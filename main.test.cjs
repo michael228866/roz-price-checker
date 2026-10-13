@@ -1,0 +1,79 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+test("resumes after human verification without losing completed keywords", async () => {
+  const handlers = new Map();
+  const events = [];
+  const directory = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "roz-main-"));
+  let queries = 0;
+  class BrowserWindow {
+    constructor() {
+      this.webContents = {
+        send: (name, value) => events.push({ name, value }),
+        once() {},
+        executeJavaScript: async (script) => {
+          if (script.includes("document.readyState")) return true;
+          if (script.includes("return { started: true }")) {
+            queries += 1;
+            return { started: true };
+          }
+          if (script.includes("const message =")) {
+            return {
+              changed: true,
+              loading: false,
+              noResults: false,
+              output: [{ shop: `shop${queries}`, itemName: "Example", slots: "1", price: 100, quantity: 1, storeType: "販售" }],
+              messageText: queries === 2 ? "請完成圖形驗證" : ""
+            };
+          }
+          return undefined;
+        }
+      };
+    }
+    loadFile() {}
+    loadURL() {}
+    on() {}
+    focus() {}
+    isDestroyed() { return false; }
+  }
+  const electron = {
+    app: { whenReady: () => Promise.resolve(), on() {}, getPath: () => directory },
+    BrowserWindow,
+    ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
+    Notification: { isSupported: () => false },
+    safeStorage: { isEncryptionAvailable: () => false }
+  };
+  class FakeStore {
+    catalog() { return []; }
+    startRun() { return 1; }
+    finishRun() {}
+    saveObservations() { return []; }
+    saveVisibleAlerts() { return []; }
+    pendingAlerts() { return []; }
+    status() { return { catalog: 0, listings: 0, pendingAlerts: 0, lastRun: null }; }
+  }
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8"), {
+    require: (name) => name === "electron" ? electron
+      : name === "./store.cjs" ? { MarketStore: FakeStore } : require(name),
+    __dirname,
+    setTimeout: (callback) => callback(),
+    setInterval: () => 1,
+    clearInterval() {}
+  });
+  await Promise.resolve();
+
+  await handlers.get("start-scanning")(null, { keywords: ["first", "second"], ratio: 0.15 });
+  assert.equal(queries, 2);
+  assert.ok(events.some(({ name, value }) => name === "scan-state" && value === "paused"));
+
+  await handlers.get("resume-scanning")();
+  assert.equal(queries, 3);
+  assert.equal(events.find(({ name }) => name === "scan-results").value.listingCount, 2);
+
+  handlers.get("stop-scanning")();
+  await assert.rejects(handlers.get("resume-scanning")(), /沒有可繼續的掃描/);
+  fs.rmSync(directory, { recursive: true, force: true });
+});

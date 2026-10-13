@@ -1,0 +1,9 @@
+node_modules/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+*.enc
+scan-checkpoint.json
+.env
+browser_profile/
