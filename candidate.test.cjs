@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { findCandidates, median } = require("./candidate.cjs");
+const { fingerprint } = require("./market.cjs");
 
 test("median handles odd and even input lengths", () => {
   assert.equal(median([10, 30, 20]), 20);
@@ -17,9 +18,13 @@ test("flags only extreme sale prices against comparable listings", () => {
     { shop: "F", itemName: "Example", slots: "1", price: 500, storeType: "收購" }
   ];
 
-  assert.deepEqual(findCandidates(listings), [
-    { ...listings[3], referencePrice: 105000 }
-  ]);
+  const complete = listings.map((item) => ({ ...item, quantity: 1, serverId: 529,
+    specification: fingerprint({ itemName: item.itemName, DefaultSlotCount: item.slots }),
+    specComplete: true }));
+  const result = findCandidates(complete);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].shop, "D");
+  assert.equal(result[0].referencePrice, 110000);
 });
 
 test("does not infer a bargain from fewer than three comparable listings", () => {
@@ -45,4 +50,13 @@ test("does not count the same listing from two keywords twice", () => {
   const cheap = { shop: "A", itemName: "Example", slots: "1", price: 1000, quantity: 1, storeType: "販售" };
   const normal = { shop: "B", itemName: "Example", slots: "1", price: 100000, quantity: 1, storeType: "販售" };
   assert.deepEqual(findCandidates([cheap, normal, { ...normal, keyword: "other" }]), []);
+});
+
+test("incomplete visible specifications cannot produce price alerts", () => {
+  const listings = [100000, 110000, 120000, 1000].map((price, index) => ({
+    shop: String(index), itemName: "Example", slots: "1", price, storeType: "販售",
+    serverId: 529, specification: fingerprint({ itemName: "Example", DefaultSlotCount: "1" }),
+    specComplete: false
+  }));
+  assert.deepEqual(findCandidates(listings), []);
 });

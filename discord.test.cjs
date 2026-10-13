@@ -14,3 +14,11 @@ test("accepts only Discord webhook endpoints and suppresses mentions", async () 
   });
   assert.deepEqual(sent.allowed_mentions.parse, []);
 });
+
+test("HTTP 429 preserves the retry delay for the outbox", async () => {
+  await assert.rejects(sendDiscord("https://discord.com/api/webhooks/123/Abc_123",
+    { itemName: "Item", shop: "A", price: 100, referencePrice: 1000,
+      type: "LOW", confidence: "MEDIUM" }, async () => ({
+      ok: false, status: 429, headers: { get: () => "2.5" }
+    })), (error) => error.status === 429 && error.retryAfterMs === 2500);
+});

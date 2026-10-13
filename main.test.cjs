@@ -48,6 +48,9 @@ test("resumes after human verification without losing completed keywords", async
   };
   class FakeStore {
     catalog() { return []; }
+    dueCatalog() { return []; }
+    historicalReferences() { return []; }
+    markKeyword() {}
     startRun() { return 1; }
     finishRun() {}
     saveObservations() { return []; }
@@ -57,7 +60,12 @@ test("resumes after human verification without losing completed keywords", async
   }
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8"), {
     require: (name) => name === "electron" ? electron
-      : name === "./store.cjs" ? { MarketStore: FakeStore } : require(name),
+      : name === "./store.cjs" ? { MarketStore: FakeStore }
+      : name === "./capture.cjs" ? {
+        captureShopResponse: async () => ({ arm() {}, peek: () => ({ status: "ready", response: { items: [], errors: [], reportedCount: null } }), close() {} }),
+        enrichVisibleRows: (rows) => rows,
+        matchesVisible: () => true
+      } : require(name),
     __dirname,
     setTimeout: (callback) => callback(),
     setInterval: () => 1,

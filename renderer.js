@@ -24,8 +24,11 @@ includeCatalogInput.checked = localStorage.getItem("includeCatalog") === "true";
 intervalInput.value = localStorage.getItem("intervalMinutes") || "10";
 
 function showMarketStatus(status) {
+  const coverage = status.coverage;
   document.querySelector("#market-status").textContent =
     `已知商品 ${status.catalog} 筆 · 已存掛單 ${status.listings} 筆 · 待送通知 ${status.pendingAlerts} 筆 · 最近掃描 ${status.lastRun?.status || "無"}`;
+  if (coverage) document.querySelector("#market-status").textContent +=
+    `・索引覆蓋 ${coverage.scanned ?? 0}/${coverage.known ?? 0}`;
 }
 window.shopAlert.marketStatus().then(showMarketStatus).catch((error) => setStatus(error.message, "error"));
 window.shopAlert.onMarketStatus(showMarketStatus);

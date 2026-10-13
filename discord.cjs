@@ -19,7 +19,16 @@ async function sendDiscord(url, alert, fetchImpl = fetch) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify(body), signal: AbortSignal.timeout(10000)
   });
-  if (!response.ok) throw new Error(`Discord 通知失敗：HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`Discord 通知失敗：HTTP ${response.status}`);
+    error.status = response.status;
+    if (response.status === 429) {
+      const seconds = Number(response.headers?.get?.("retry-after"));
+      error.retryAfterMs = Number.isFinite(seconds) && seconds > 0
+        ? Math.min(Math.ceil(seconds * 1000), 3600000) : 60000;
+    }
+    throw error;
+  }
 }
 
 module.exports = { validWebhook, sendDiscord };

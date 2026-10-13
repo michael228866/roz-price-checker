@@ -66,10 +66,22 @@ function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-function analyze(items) {
+function listingIdentity(item) {
+  return crypto.createHash("sha256").update(JSON.stringify([
+    item.serverId, item.shop, item.specification,
+    item.verifiedListingId === true ? item.listingId : null
+  ])).digest("hex");
+}
+
+function analyze(items, history = []) {
   const groups = new Map();
-  for (const item of items) {
-    if (!Number.isSafeInteger(item.price) || item.price <= 0 || item.storeType !== "販售") continue;
+  const latest = new Map();
+  for (const item of [...history, ...items]) {
+    if (!Number.isSafeInteger(item.price) || item.price <= 0 ||
+        item.storeType !== "販售" || !item.specComplete || !item.shop) continue;
+    latest.set(listingIdentity(item), item);
+  }
+  for (const item of latest.values()) {
     const key = `${item.serverId}:${item.specification}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(item);
@@ -77,9 +89,10 @@ function analyze(items) {
   const results = [];
   for (const group of groups.values()) {
     for (const item of group) {
+      if (!items.some((current) => listingIdentity(current) === listingIdentity(item))) continue;
       const independent = new Map();
       for (const other of group) {
-        if (other === item || !other.shop || other.shop === item.shop) continue;
+        if (listingIdentity(other) === listingIdentity(item) || other.shop === item.shop) continue;
         const existing = independent.get(other.shop);
         if (!existing || other.price < existing.price) independent.set(other.shop, other);
       }
@@ -87,9 +100,8 @@ function analyze(items) {
       if (!references.length) continue;
       const referencePrice = median(references.map((entry) => entry.price));
       const ratio = item.price / referencePrice;
-      const confidence = item.specComplete && references.every((entry) => entry.specComplete)
-        ? references.length >= 5 ? "HIGH" : references.length >= 3 ? "MEDIUM" : "LOW"
-        : "INSUFFICIENT";
+      const confidence = references.length >= 5 ? "HIGH" :
+        references.length >= 3 ? "MEDIUM" : "LOW";
       results.push({ ...item, referencePrice, ratio, sampleCount: references.length,
         confidence, anomalyType: classify(ratio),
         missingZeroMatch: ratio >= 0.085 && ratio <= 0.115 });
@@ -99,9 +111,14 @@ function analyze(items) {
 }
 
 function listingKey(item) {
+  return listingIdentity(item);
+}
+
+function listingVersion(item) {
   return crypto.createHash("sha256").update(JSON.stringify([
-    item.serverId, item.shop, item.specification, item.price, item.quantity
+    listingIdentity(item), item.price, item.quantity
   ])).digest("hex");
 }
 
-module.exports = { fingerprint, parseResponse, fromVisibleRows, analyze, listingKey };
+module.exports = { fingerprint, parseResponse, fromVisibleRows, analyze,
+  listingKey, listingIdentity, listingVersion };

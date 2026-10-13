@@ -1,12 +1,12 @@
 const { app, BrowserWindow, ipcMain, Notification, safeStorage } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const { findCandidates } = require("./candidate.cjs");
 const { fromVisibleRows, analyze } = require("./market.cjs");
 const { MarketStore } = require("./store.cjs");
 const { parseCsv } = require("./catalog.cjs");
 const { validWebhook, sendDiscord } = require("./discord.cjs");
-const { captureShopResponse, enrichVisibleRows } = require("./capture.cjs");
+const { captureShopResponse, enrichVisibleRows, matchesVisible } = require("./capture.cjs");
+const { collectPages } = require("./paginator.cjs");
 
 const shopUrl = "https://event.gnjoy.com.tw/RoZ/RoZ_ShopSearch";
 const keywordDelayMs = 3000;
@@ -24,7 +24,8 @@ let includeCatalog = false;
 let marketStore;
 let discordWebhook = null;
 let activeProgress = null;
-let catalogCursor = 0;
+let deliveryInProgress = false;
+let deliveryTimer;
 
 function logEvent(code, details = {}) {
   if (!marketStore) return;
@@ -55,7 +56,7 @@ function loadCheckpoint() {
     return Array.isArray(value.keywords) && Array.isArray(value.listings) &&
       Number.isInteger(value.nextIndex) && value.nextIndex >= 0 &&
       value.nextIndex < value.keywords.length && Number.isInteger(value.runId)
-      ? value : null;
+      ? { ...value, catalogDue: value.catalogDue ?? [], pageStatuses: value.pageStatuses ?? [] } : null;
   } catch { return null; }
 }
 
@@ -68,18 +69,28 @@ function loadWebhook() {
 }
 
 async function deliverPendingAlerts() {
-  if (!discordWebhook) return;
+  if (!discordWebhook || deliveryInProgress) return;
+  deliveryInProgress = true;
+  try {
   for (const alert of marketStore.pendingAlerts()) {
     try {
       await sendDiscord(discordWebhook, alert);
       marketStore.markDelivery(alert.key, "sent");
       logEvent("DISCORD_SENT", { alertKey: alert.key });
     } catch (error) {
-      marketStore.markDelivery(alert.key, alert.attempts + 1 >= 3 ? "failed" : "pending",
-        error.name === "TimeoutError" ? "TIMEOUT" : "DELIVERY_FAILED");
+      const rateLimited = error.status === 429;
+      const permanent = error.status >= 400 && error.status < 500 && !rateLimited;
+      const delay = rateLimited ? error.retryAfterMs :
+        Math.min(60000 * 2 ** alert.attempts, 3600000);
+      const status = permanent || (!rateLimited && alert.attempts + 1 >= 3) ? "failed" : "pending";
+      marketStore.markDelivery(alert.key, status,
+        rateLimited ? "HTTP_429" : error.status ? `HTTP_${error.status}` : "DELIVERY_FAILED",
+        status === "pending" ? new Date(Date.now() + delay).toISOString() : null, !rateLimited);
       logEvent("DISCORD_FAILED", { alertKey: alert.key });
+      if (rateLimited) break;
     }
   }
+  } finally { deliveryInProgress = false; }
 }
 
 function sendStatus(message, state = "info") {
@@ -168,31 +179,31 @@ async function getScanKeywords() {
   }
 
   const allKeywords = [...watchedKeywords];
+  let catalogDue = [];
   if (includeCatalog) {
     const slots = Math.max(0, 20 - new Set(allKeywords).size);
     if (slots) {
-      let catalogItems = marketStore.catalog(slots, catalogCursor);
-      if (!catalogItems.length) { catalogCursor = 0; catalogItems = marketStore.catalog(slots, 0); }
-      allKeywords.push(...catalogItems.map((item) => item.name));
-      catalogCursor += catalogItems.length;
+      catalogDue = marketStore.dueCatalog(slots).map((item) => item.name);
+      allKeywords.push(...catalogDue);
     }
   }
   allKeywords.push(...hotKeywords);
   const uniqueKeywords = [...new Set(allKeywords)];
-  if (!uniqueKeywords.length) throw new Error("商品索引是空的，請先匯入 CSV 或輸入關鍵字。");
+  if (!uniqueKeywords.length && !includeCatalog) throw new Error("請輸入關鍵字或匯入商品索引。");
   const maxKeywords = 20;
   return {
     keywords: uniqueKeywords.slice(0, maxKeywords),
     wasCapped: uniqueKeywords.length > maxKeywords,
-    hotKeywordCount: hotKeywords.length
+    hotKeywordCount: hotKeywords.length,
+    catalogDue
   };
 }
 
 async function runOneKeyword(keyword, generation) {
   const capture = await captureShopResponse(shopWindow.webContents, keyword);
-  let captured = null;
-  capture.result.then((value) => { captured = value; });
+  if (!capture) throw new Error("無法驗證本次查詢的回應，已停止掃描。");
   try {
+  capture.arm();
   const result = await shopWindow.webContents.executeJavaScript(
     `(() => {
       const loginButton = document.querySelector('#a_searchBtn');
@@ -231,7 +242,11 @@ async function runOneKeyword(keyword, generation) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     await wait(500);
     if (generation !== scanGeneration) return [];
-    if (captured?.rateLimited) throw new Error("網站限制查詢（HTTP 403/429），掃描已停止。");
+    const captured = capture.peek();
+    if (captured.response?.rateLimited) throw new Error("網站限制查詢（HTTP 403/429），掃描已停止。");
+    if (captured.status === "ambiguous" || captured.status === "invalid") {
+      throw new Error("查詢回應無法可靠配對，已停止掃描。");
+    }
     const state = await shopWindow.webContents.executeJavaScript(`(() => {
       const message = document.querySelector('.swal2-html-container, .swal2-content');
       const messageText = message?.textContent?.trim() || '';
@@ -259,12 +274,16 @@ async function runOneKeyword(keyword, generation) {
     if (state.messageText && /登入|驗證|圖形驗證|驗證碼/.test(state.messageText)) {
       throw new Error(`網站要求處理：${state.messageText}`);
     }
-    if (state.changed && !state.loading && (state.output.length > 0 || state.noResults)) {
+    if (state.changed && !state.loading && (state.output.length > 0 || state.noResults) &&
+        captured.status === "ready" && matchesVisible(state.output, captured.response)) {
       await shopWindow.webContents.executeJavaScript("window.__shopResultObserver?.disconnect()");
       const visible = state.output.map((listing) => ({ ...listing, keyword }));
-      const parsed = await Promise.race([capture.result, wait(500).then(() => null)]);
-      if (parsed?.rateLimited) throw new Error("網站限制查詢（HTTP 403/429），掃描已停止。");
-      return enrichVisibleRows(visible, parsed);
+      const page = await collectPages(async () => ({
+        items: enrichVisibleRows(visible, captured.response),
+        reportedCount: captured.response.reportedCount, hasNext: null
+      }), { maxPages: 1 });
+      return { rows: page.items, status: page.status, pageCount: page.pageCount,
+        reportedCount: page.reportedCount };
     }
   }
   throw new Error(`「${keyword}」查詢逾時。若網站顯示人工驗證，請先在查詢頁完成驗證後再開始掃描。`);
@@ -289,20 +308,30 @@ async function scan(resumeState = null) {
     await waitForShopReady();
     if (generation !== scanGeneration) return;
     if (!progress) {
-      const { keywords, wasCapped, hotKeywordCount } = await getScanKeywords();
-      progress = { keywords, wasCapped, hotKeywordCount, listings: [], nextIndex: 0,
-        runId: marketStore.startRun() };
+      const { keywords, wasCapped, hotKeywordCount, catalogDue } = await getScanKeywords();
+      progress = { keywords, wasCapped, hotKeywordCount, catalogDue,
+        listings: [], pageStatuses: [], nextIndex: 0, runId: marketStore.startRun() };
     }
     activeProgress = progress;
     if (generation !== scanGeneration) return;
     const { keywords, wasCapped, hotKeywordCount, listings } = progress;
+    if (!keywords.length) {
+      marketStore.finishRun(progress.runId, "PARTIAL", { paginationStatus: "PAGINATION_UNVERIFIED" });
+      activeProgress = null;
+      clearCheckpoint();
+      sendStatus("目前沒有到期的商品索引關鍵字，等待下一輪。", "info");
+      return;
+    }
     sendStatus(`掃描中：${keywords.length} 個關鍵字${includeHotKeywords ? `（網站熱門詞 ${hotKeywordCount} 個）` : ""}…`);
     for (let index = progress.nextIndex; index < keywords.length; index += 1) {
       if (generation !== scanGeneration) return;
       if (index > 0 || resumeState) await wait(keywordDelayMs);
       if (generation !== scanGeneration) return;
-      listings.push(...await runOneKeyword(keywords[index], generation));
+      const page = await runOneKeyword(keywords[index], generation);
       if (generation !== scanGeneration) return;
+      listings.push(...page.rows);
+      progress.pageStatuses.push(page.status);
+      if (progress.catalogDue?.includes(keywords[index])) marketStore.markKeyword(keywords[index], true);
       progress.nextIndex = index + 1;
       saveCheckpoint(progress);
     }
@@ -311,17 +340,13 @@ async function scan(resumeState = null) {
       ...item, specification: row.specification ?? item.specification,
       specComplete: row.specComplete === true, source: row.source ?? item.source
     })));
-    const analyses = analyze(observations);
-    const engineAlerts = marketStore.saveObservations(progress.runId, observations, analyses);
-    const candidates = findCandidates(listings, { ratio: thresholdRatio });
-    const visibleAlerts = candidates.flatMap((row) => {
-      const item = observations.find((entry) => !entry.specComplete && entry.shop === row.shop &&
-        entry.itemName === row.itemName && entry.price === row.price && entry.quantity === row.quantity);
-      return item ? [{ ...item, referencePrice: row.referencePrice }] : [];
-    });
-    const freshCandidates = [...engineAlerts, ...marketStore.saveVisibleAlerts(visibleAlerts)];
+    const analyses = analyze(observations, marketStore.historicalReferences());
+    const freshCandidates = marketStore.saveObservations(progress.runId, observations, analyses,
+      { maxAlertRatio: thresholdRatio });
     marketStore.finishRun(progress.runId, "PARTIAL", {
-      attempted: keywords.length, succeeded: keywords.length, listings: observations.length
+      attempted: keywords.length, succeeded: keywords.length, listings: observations.length,
+      paginationStatus: progress.pageStatuses.every((status) => status === "COMPLETE")
+        ? "COMPLETE" : "PAGINATION_UNVERIFIED"
     });
     activeProgress = null;
     clearCheckpoint();
@@ -352,11 +377,14 @@ async function scan(resumeState = null) {
     });
     appWindow?.webContents.send("market-status", marketStore.status());
     sendStatus(
-      `掃描完成：查詢 ${keywords.length} 個關鍵字，查到 ${listings.length} 筆，新增 ${freshCandidates.length} 個低價候選。${wasCapped ? "關鍵字超過 20 個，已依序保留前 20 個。" : ""}下一次約 10 分鐘後。`,
+      `掃描完成：查詢 ${keywords.length} 個關鍵字，查到 ${listings.length} 筆，新增 ${freshCandidates.length} 個低價候選。${wasCapped ? "關鍵字超過 20 個，已依序保留前 20 個。" : ""}下一次約 ${scanIntervalMs / 60000} 分鐘後。分頁尚未驗證。`,
       "success"
     );
   } catch (error) {
     if (generation !== scanGeneration) return;
+    if (progress?.catalogDue?.includes(progress.keywords[progress.nextIndex])) {
+      marketStore.markKeyword(progress.keywords[progress.nextIndex], false);
+    }
     if (progress && /登入|驗證|驗證碼|查詢逾時/.test(error.message)) {
       if (scanTimer) clearInterval(scanTimer);
       scanTimer = null;
@@ -480,9 +508,12 @@ app.whenReady().then(() => {
   discordWebhook = loadWebhook();
   pausedScan = loadCheckpoint();
   createAppWindow();
+  deliveryTimer = setInterval(() => deliverPendingAlerts().catch(() =>
+    logEvent("DELIVERY_LOOP_FAILED")), 60000);
 });
 app.on("window-all-closed", () => {
   stopScanning();
+  if (deliveryTimer) clearInterval(deliveryTimer);
   marketStore?.close();
   if (process.platform !== "darwin") app.quit();
 });

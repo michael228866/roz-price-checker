@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
-const { listingKey } = require("./market.cjs");
+const { listingKey, listingVersion } = require("./market.cjs");
 
 class MarketStore {
   constructor(filename) {
@@ -41,16 +41,40 @@ class MarketStore {
         delivery_status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
         last_error TEXT
       );
+      CREATE TABLE IF NOT EXISTS listing_versions (
+        key TEXT PRIMARY KEY, listing_key TEXT NOT NULL, server_id INTEGER NOT NULL,
+        shop TEXT NOT NULL, item_name TEXT NOT NULL, specification TEXT NOT NULL,
+        price INTEGER NOT NULL, quantity INTEGER NOT NULL, spec_complete INTEGER NOT NULL,
+        first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS listing_versions_latest ON listing_versions(listing_key, last_seen);
+      CREATE TABLE IF NOT EXISTS version_snapshots (
+        run_id INTEGER NOT NULL REFERENCES scan_runs(id), version_key TEXT NOT NULL REFERENCES listing_versions(key),
+        observed_at TEXT NOT NULL, PRIMARY KEY (run_id, version_key)
+      );
+      CREATE TABLE IF NOT EXISTS search_keywords (
+        name TEXT PRIMARY KEY, tier TEXT NOT NULL, last_attempt_at TEXT,
+        last_success_at TEXT, attempts INTEGER NOT NULL DEFAULT 0
+      );
     `);
+    const columns = this.db.prepare("PRAGMA table_info(price_alerts)").all().map((column) => column.name);
+    if (!columns.includes("next_attempt_at")) {
+      this.db.exec("ALTER TABLE price_alerts ADD COLUMN next_attempt_at TEXT");
+    }
   }
 
   importCatalog(items, source = "csv") {
     const statement = this.db.prepare(`INSERT INTO catalog (name, tier, source, updated_at)
       VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET tier=excluded.tier,
       source=excluded.source, updated_at=excluded.updated_at`);
+    const schedule = this.db.prepare(`INSERT INTO search_keywords (name, tier) VALUES (?, ?)
+      ON CONFLICT(name) DO UPDATE SET tier=excluded.tier`);
     this.db.exec("BEGIN");
     try {
-      for (const item of items) statement.run(item.name, item.tier, source, new Date().toISOString());
+      for (const item of items) {
+        statement.run(item.name, item.tier, source, new Date().toISOString());
+        schedule.run(item.name, item.tier);
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -61,6 +85,44 @@ class MarketStore {
 
   catalog(limit = 20, offset = 0) {
     return this.db.prepare("SELECT name, tier FROM catalog ORDER BY tier, name LIMIT ? OFFSET ?").all(limit, offset);
+  }
+
+  dueCatalog(limit = 20, now = new Date()) {
+    const cutoffs = [5, 15, 60].map((minutes) => new Date(now.getTime() - minutes * 60000).toISOString());
+    const due = this.db.prepare(`SELECT name, tier FROM search_keywords WHERE
+      last_attempt_at IS NULL OR (tier='P0' AND last_attempt_at <= ?) OR
+      (tier='P1' AND last_attempt_at <= ?) OR (tier='P2' AND last_attempt_at <= ?)
+      ORDER BY COALESCE(last_attempt_at, ''), name`).all(...cutoffs);
+    const queues = { P0: [], P1: [], P2: [] };
+    for (const item of due) queues[item.tier]?.push(item);
+    const result = [];
+    const cycle = ["P0", "P0", "P1", "P0", "P1", "P2"];
+    while (result.length < limit && cycle.some((tier) => queues[tier].length)) {
+      for (const tier of cycle) {
+        if (queues[tier].length && result.length < limit) result.push(queues[tier].shift());
+      }
+    }
+    return result;
+  }
+
+  markKeyword(name, succeeded, at = new Date().toISOString()) {
+    this.db.prepare(`UPDATE search_keywords SET last_attempt_at=?, attempts=attempts+1,
+      last_success_at=CASE WHEN ? THEN ? ELSE last_success_at END WHERE name=?`)
+      .run(at, succeeded ? 1 : 0, at, name);
+  }
+
+  historicalReferences(maxAgeHours = 72, now = new Date()) {
+    const cutoff = new Date(now.getTime() - maxAgeHours * 3600000).toISOString();
+    const rows = this.db.prepare(`SELECT * FROM listing_versions WHERE last_seen >= ? AND spec_complete=1
+      ORDER BY last_seen DESC`).all(cutoff);
+    const seen = new Set();
+    return rows.filter((row) => {
+      if (seen.has(row.listing_key)) return false;
+      seen.add(row.listing_key);
+      return true;
+    }).map((row) => ({ serverId: row.server_id, shop: row.shop,
+      itemName: row.item_name, specification: row.specification,
+      price: row.price, quantity: row.quantity, specComplete: true, storeType: "販售" }));
   }
 
   startRun() {
@@ -75,12 +137,19 @@ class MarketStore {
         metrics.listings ?? 0, metrics.paginationStatus ?? "PAGINATION_UNVERIFIED", error, id);
   }
 
-  saveObservations(runId, items, analyses) {
+  saveObservations(runId, items, analyses, { maxAlertRatio = 0.15 } = {}) {
     const now = new Date().toISOString();
     const upsert = this.db.prepare(`INSERT INTO listings
       (key, server_id, shop, item_name, specification, price, quantity, spec_complete, first_seen, last_seen)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET price=excluded.price, quantity=excluded.quantity,
+      spec_complete=excluded.spec_complete, last_seen=excluded.last_seen`);
+    const version = this.db.prepare(`INSERT INTO listing_versions
+      (key, listing_key, server_id, shop, item_name, specification, price, quantity,
+       spec_complete, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET last_seen=excluded.last_seen`);
+    const versionSnapshot = this.db.prepare(`INSERT OR IGNORE INTO version_snapshots
+      (run_id, version_key, observed_at) VALUES (?, ?, ?)`);
     const snapshot = this.db.prepare("INSERT OR IGNORE INTO listing_snapshots (run_id, listing_key, observed_at) VALUES (?, ?, ?)");
     const baseline = this.db.prepare(`INSERT OR REPLACE INTO market_baselines
       (run_id, listing_key, reference_price, sample_count, confidence) VALUES (?, ?, ?, ?, ?)`);
@@ -95,12 +164,17 @@ class MarketStore {
         upsert.run(key, item.serverId, item.shop, item.itemName, item.specification,
           item.price, item.quantity, item.specComplete ? 1 : 0, now, now);
         snapshot.run(runId, key, now);
+        const versionKey = listingVersion(item);
+        version.run(versionKey, key, item.serverId, item.shop, item.itemName,
+          item.specification, item.price, item.quantity, item.specComplete ? 1 : 0, now, now);
+        versionSnapshot.run(runId, versionKey, now);
       }
       for (const item of analyses) {
         const key = listingKey(item);
         baseline.run(runId, key, item.referencePrice, item.sampleCount, item.confidence);
-        if (item.confidence === "INSUFFICIENT" || item.sampleCount < 3 || item.anomalyType === "NORMAL") continue;
-        const alertKey = `${key}:${item.anomalyType}`;
+        if (item.confidence === "INSUFFICIENT" || item.sampleCount < 3 ||
+            item.anomalyType === "NORMAL" || item.ratio > maxAlertRatio) continue;
+        const alertKey = `${listingVersion(item)}:${item.anomalyType}`;
         if (alert.run(alertKey, key, item.anomalyType, item.price, item.referencePrice,
           item.confidence, now).changes) fresh.push({ ...item, alertKey });
       }
@@ -131,12 +205,15 @@ class MarketStore {
     return this.db.prepare(`SELECT a.key, a.type, a.price, a.reference_price AS referencePrice,
       a.confidence, a.attempts, l.item_name AS itemName, l.shop
       FROM price_alerts a JOIN listings l ON l.key=a.listing_key
-      WHERE a.delivery_status='pending' AND a.attempts < 3 ORDER BY a.created_at LIMIT ?`).all(limit);
+      WHERE a.delivery_status='pending' AND a.attempts < 3 AND
+      (a.next_attempt_at IS NULL OR a.next_attempt_at <= ?)
+      ORDER BY a.created_at LIMIT ?`).all(new Date().toISOString(), limit);
   }
 
-  markDelivery(key, status, error = null) {
-    this.db.prepare("UPDATE price_alerts SET delivery_status=?, attempts=attempts+1, last_error=? WHERE key=?")
-      .run(status, error, key);
+  markDelivery(key, status, error = null, nextAttemptAt = null, countAttempt = true) {
+    this.db.prepare(`UPDATE price_alerts SET delivery_status=?, attempts=attempts+?,
+      last_error=?, next_attempt_at=? WHERE key=?`)
+      .run(status, countAttempt ? 1 : 0, error, nextAttemptAt, key);
   }
 
   status() {
@@ -144,6 +221,9 @@ class MarketStore {
       catalog: this.db.prepare("SELECT COUNT(*) AS count FROM catalog").get().count,
       listings: this.db.prepare("SELECT COUNT(*) AS count FROM listings").get().count,
       pendingAlerts: this.db.prepare("SELECT COUNT(*) AS count FROM price_alerts WHERE delivery_status='pending'").get().count,
+      coverage: this.db.prepare(`SELECT COUNT(*) AS known,
+        SUM(CASE WHEN last_success_at IS NOT NULL THEN 1 ELSE 0 END) AS scanned
+        FROM search_keywords`).get(),
       lastRun: this.db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() ?? null
     };
   }
