@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { parseShopLocation } = require("./shop_location.cjs");
 
 const specificationFields = [
   "itemName", "itemRefining", "ItemGradeLevel", "DefaultSlotCount",
@@ -27,6 +28,8 @@ function parseResponse(payload, { keyword = "", serverId = 529 } = {}) {
     const item = {
       keyword, serverId, shop: String(row.storeName ?? ""), itemName: row.itemName,
       price, quantity, storeType: row.storetype, specification: fingerprint(row),
+      ssi: row.SSI2 == null ? null : String(row.SSI2),
+      location: parseShopLocation(row, "search_response"),
       specComplete: specificationFields.every((field) => row[field] !== undefined && row[field] !== null),
       source: "response"
     };
@@ -48,7 +51,8 @@ function fromVisibleRows(rows, keyword, serverId = 529) {
       keyword, serverId, shop: row.shop, itemName: row.itemName,
       slots: row.slots, price: row.price, quantity: row.quantity, storeType: row.storeType,
       specification: fingerprint({ itemName: row.itemName, DefaultSlotCount: row.slots }),
-      specComplete: false, source: "visible_rows"
+      specComplete: false, source: "visible_rows",
+      ssi: row.ssi ?? null, location: null
     }));
 }
 

@@ -1,12 +1,13 @@
-const { app, BrowserWindow, ipcMain, Notification, safeStorage } = require("electron");
+const { app, BrowserWindow, ipcMain, Notification, safeStorage, clipboard } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const { fromVisibleRows, analyze } = require("./market.cjs");
+const { fromVisibleRows, analyze, listingKey } = require("./market.cjs");
 const { MarketStore } = require("./store.cjs");
 const { parseCsv } = require("./catalog.cjs");
 const { validWebhook, sendDiscord } = require("./discord.cjs");
-const { captureShopResponse, enrichVisibleRows, matchesVisible } = require("./capture.cjs");
+const { captureShopResponse, captureShopLocation, enrichVisibleRows, matchesVisible } = require("./capture.cjs");
 const { collectPages } = require("./paginator.cjs");
+const { navigationCommand } = require("./shop_location.cjs");
 
 const shopUrl = "https://event.gnjoy.com.tw/RoZ/RoZ_ShopSearch";
 const keywordDelayMs = 3000;
@@ -199,7 +200,15 @@ async function getScanKeywords() {
   };
 }
 
-async function runOneKeyword(keyword, generation) {
+function toObservation(row) {
+  return fromVisibleRows([row], row.keyword).map((item) => ({
+    ...item, specification: row.specification ?? item.specification,
+    specComplete: row.specComplete === true, source: row.source ?? item.source,
+    ssi: row.ssi ?? null, location: row.location ?? null
+  }));
+}
+
+async function runOneKeyword(keyword, generation, previous = [], history = []) {
   const capture = await captureShopResponse(shopWindow.webContents, keyword);
   if (!capture) throw new Error("無法驗證本次查詢的回應，已停止掃描。");
   try {
@@ -257,9 +266,11 @@ async function runOneKeyword(keyword, generation) {
       const noResults = !!noResultsElement && noResultsElement.offsetParent !== null;
       const output = rows
         .filter(row => row.querySelectorAll('td').length >= 6)
-        .map(row => {
+        .map((row, rowIndex) => {
           const cells = Array.from(row.querySelectorAll('td')).map(cell => cell.textContent.trim());
           return {
+            rowIndex,
+            ssi: row.querySelector('.shopName')?.getAttribute('SSI') || null,
             shop: cells[0],
             itemName: cells[1],
             slots: cells[2],
@@ -282,6 +293,34 @@ async function runOneKeyword(keyword, generation) {
         items: enrichVisibleRows(visible, captured.response),
         reportedCount: captured.response.reportedCount, hasNext: null
       }), { maxPages: 1 });
+      capture.close();
+      const provisional = analyze([...previous, ...page.items.flatMap(toObservation)], history)
+        .filter((item) => item.sampleCount >= 3 && item.ratio <= thresholdRatio);
+      const targetKeys = new Set(provisional.map(listingKey));
+      for (const row of page.items) {
+        if (generation !== scanGeneration) break;
+        const [item] = toObservation(row);
+        if (!item || !row.ssi || !targetKeys.has(listingKey(item))) continue;
+        try {
+          const request = { rowIndex: row.rowIndex, ssi: row.ssi, shop: row.shop,
+            price: row.price, quantity: row.quantity };
+          row.location = await captureShopLocation(shopWindow.webContents,
+            { ...row, serverId: 529 }, () => shopWindow.webContents.executeJavaScript(`(() => {
+              const target = ${JSON.stringify(request)};
+              const tr = document.querySelectorAll('#_tbody tr')[target.rowIndex];
+              const shop = tr?.querySelector('.shopName');
+              const cells = tr ? Array.from(tr.querySelectorAll('td')).map(td => td.textContent.trim()) : [];
+              if (!shop || shop.getAttribute('SSI') !== target.ssi ||
+                  cells[0] !== target.shop ||
+                  Number(cells[3].replace(/[^0-9]/g, '')) !== target.price ||
+                  Number(cells[4].replace(/[^0-9]/g, '')) !== target.quantity) return false;
+              shop.click();
+              return true;
+            })()`));
+          await shopWindow.webContents.executeJavaScript(
+            "document.querySelector('.popup__itemInfo .close')?.click()");
+        } catch (error) { logEvent("SHOP_LOCATION_FAILED", { reason: error.message }); }
+      }
       return { rows: page.items, status: page.status, pageCount: page.pageCount,
         reportedCount: page.reportedCount };
     }
@@ -315,6 +354,7 @@ async function scan(resumeState = null) {
     activeProgress = progress;
     if (generation !== scanGeneration) return;
     const { keywords, wasCapped, hotKeywordCount, listings } = progress;
+    const history = marketStore.historicalReferences();
     if (!keywords.length) {
       marketStore.finishRun(progress.runId, "PARTIAL", { paginationStatus: "PAGINATION_UNVERIFIED" });
       activeProgress = null;
@@ -327,7 +367,8 @@ async function scan(resumeState = null) {
       if (generation !== scanGeneration) return;
       if (index > 0 || resumeState) await wait(keywordDelayMs);
       if (generation !== scanGeneration) return;
-      const page = await runOneKeyword(keywords[index], generation);
+      const page = await runOneKeyword(keywords[index], generation,
+        listings.flatMap(toObservation), history);
       if (generation !== scanGeneration) return;
       listings.push(...page.rows);
       progress.pageStatuses.push(page.status);
@@ -336,13 +377,12 @@ async function scan(resumeState = null) {
       saveCheckpoint(progress);
     }
 
-    const observations = listings.flatMap((row) => fromVisibleRows([row], row.keyword).map((item) => ({
-      ...item, specification: row.specification ?? item.specification,
-      specComplete: row.specComplete === true, source: row.source ?? item.source
-    })));
-    const analyses = analyze(observations, marketStore.historicalReferences());
+    const observations = listings.flatMap(toObservation);
+    const analyses = analyze(observations, history);
     const freshCandidates = marketStore.saveObservations(progress.runId, observations, analyses,
-      { maxAlertRatio: thresholdRatio });
+      { maxAlertRatio: thresholdRatio }).map((item) => ({
+        ...item, navigation: navigationCommand(item.location)
+      }));
     marketStore.finishRun(progress.runId, "PARTIAL", {
       attempted: keywords.length, succeeded: keywords.length, listings: observations.length,
       paginationStatus: progress.pageStatuses.every((status) => status === "COMPLETE")
@@ -502,6 +542,13 @@ ipcMain.handle("set-discord", (_event, url) => {
   return true;
 });
 ipcMain.handle("discord-status", () => Boolean(discordWebhook));
+ipcMain.handle("copy-navigation", (_event, command) => {
+  if (typeof command !== "string" ||
+      !/^\/navi [A-Za-z][A-Za-z0-9_]* [1-9]\d*\/[1-9]\d*$/.test(command)) {
+    throw new Error("導航指令無效");
+  }
+  clipboard.writeText(command);
+});
 
 app.whenReady().then(() => {
   marketStore = new MarketStore(path.join(app.getPath("userData"), "market.sqlite"));

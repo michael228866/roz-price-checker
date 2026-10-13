@@ -2,6 +2,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { listingKey, listingVersion } = require("./market.cjs");
+const { navigationCommand } = require("./shop_location.cjs");
+
+function verifiedLocation(item) {
+  const location = item.location;
+  return location?.source === "shop_detail_response" &&
+    location.confidence === "MATCHED_SHOP_DETAIL" && navigationCommand(location)
+    ? location : null;
+}
 
 class MarketStore {
   constructor(filename) {
@@ -60,6 +68,15 @@ class MarketStore {
     const columns = this.db.prepare("PRAGMA table_info(price_alerts)").all().map((column) => column.name);
     if (!columns.includes("next_attempt_at")) {
       this.db.exec("ALTER TABLE price_alerts ADD COLUMN next_attempt_at TEXT");
+    }
+    for (const table of ["listings", "price_alerts"]) {
+      const existing = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all()
+        .map((column) => column.name));
+      for (const [name, type] of [["location_map", "TEXT"], ["location_x", "INTEGER"],
+        ["location_y", "INTEGER"], ["location_source", "TEXT"],
+        ["location_confidence", "TEXT"]]) {
+        if (!existing.has(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+      }
     }
   }
 
@@ -140,10 +157,14 @@ class MarketStore {
   saveObservations(runId, items, analyses, { maxAlertRatio = 0.15 } = {}) {
     const now = new Date().toISOString();
     const upsert = this.db.prepare(`INSERT INTO listings
-      (key, server_id, shop, item_name, specification, price, quantity, spec_complete, first_seen, last_seen)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (key, server_id, shop, item_name, specification, price, quantity, spec_complete, first_seen, last_seen,
+       location_map, location_x, location_y, location_source, location_confidence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET price=excluded.price, quantity=excluded.quantity,
-      spec_complete=excluded.spec_complete, last_seen=excluded.last_seen`);
+      spec_complete=excluded.spec_complete, last_seen=excluded.last_seen,
+      location_map=excluded.location_map, location_x=excluded.location_x,
+      location_y=excluded.location_y, location_source=excluded.location_source,
+      location_confidence=excluded.location_confidence`);
     const version = this.db.prepare(`INSERT INTO listing_versions
       (key, listing_key, server_id, shop, item_name, specification, price, quantity,
        spec_complete, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -154,15 +175,19 @@ class MarketStore {
     const baseline = this.db.prepare(`INSERT OR REPLACE INTO market_baselines
       (run_id, listing_key, reference_price, sample_count, confidence) VALUES (?, ?, ?, ?, ?)`);
     const alert = this.db.prepare(`INSERT OR IGNORE INTO price_alerts
-      (key, listing_key, type, price, reference_price, confidence, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      (key, listing_key, type, price, reference_price, confidence, created_at,
+       location_map, location_x, location_y, location_source, location_confidence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const fresh = [];
     this.db.exec("BEGIN");
     try {
       for (const item of items) {
         const key = listingKey(item);
+        const location = verifiedLocation(item);
         upsert.run(key, item.serverId, item.shop, item.itemName, item.specification,
-          item.price, item.quantity, item.specComplete ? 1 : 0, now, now);
+          item.price, item.quantity, item.specComplete ? 1 : 0, now, now,
+          location?.mapName ?? null, location?.x ?? null, location?.y ?? null,
+          location?.source ?? null, location?.confidence ?? null);
         snapshot.run(runId, key, now);
         const versionKey = listingVersion(item);
         version.run(versionKey, key, item.serverId, item.shop, item.itemName,
@@ -174,9 +199,13 @@ class MarketStore {
         baseline.run(runId, key, item.referencePrice, item.sampleCount, item.confidence);
         if (item.confidence === "INSUFFICIENT" || item.sampleCount < 3 ||
             item.anomalyType === "NORMAL" || item.ratio > maxAlertRatio) continue;
-        const alertKey = `${listingVersion(item)}:${item.anomalyType}`;
+        const location = verifiedLocation(item);
+        const alertKey = `${listingVersion(item)}:${item.anomalyType}${location
+          ? `:${location.mapName}:${location.x}:${location.y}` : ""}`;
         if (alert.run(alertKey, key, item.anomalyType, item.price, item.referencePrice,
-          item.confidence, now).changes) fresh.push({ ...item, alertKey });
+          item.confidence, now, location?.mapName ?? null, location?.x ?? null,
+          location?.y ?? null, location?.source ?? null,
+          location?.confidence ?? null).changes) fresh.push({ ...item, location, alertKey });
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -203,7 +232,9 @@ class MarketStore {
 
   pendingAlerts(limit = 20) {
     return this.db.prepare(`SELECT a.key, a.type, a.price, a.reference_price AS referencePrice,
-      a.confidence, a.attempts, l.item_name AS itemName, l.shop
+      a.confidence, a.attempts, l.item_name AS itemName, l.shop,
+      a.location_map AS mapName, a.location_x AS x, a.location_y AS y,
+      a.location_source AS locationSource, a.location_confidence AS locationConfidence
       FROM price_alerts a JOIN listings l ON l.key=a.listing_key
       WHERE a.delivery_status='pending' AND a.attempts < 3 AND
       (a.next_attempt_at IS NULL OR a.next_attempt_at <= ?)

@@ -106,7 +106,7 @@ window.shopAlert.onResults(({ checkedAt, listingCount, candidates }) => {
     detail.textContent = `${candidate.price.toLocaleString()} Z／個 · 參考中位價 ${candidate.referencePrice.toLocaleString()} Z · ${candidate.shop}`;
     const meta = document.createElement("small");
     meta.textContent = `關鍵字「${candidate.keyword}」 · slot ${candidate.slots} · 數量 ${candidate.quantity}`;
-    article.append(title, detail, meta);
+    article.append(title, detail, meta, locationElement(candidate));
     return article;
   });
   resultsBox.prepend(...cards);
@@ -123,11 +123,34 @@ function showAlert(candidates) {
     price.textContent = `${candidate.price.toLocaleString()} Z／個`;
     const reference = document.createElement("small");
     reference.textContent = `參考中位價 ${candidate.referencePrice.toLocaleString()} Z · ${candidate.shop}`;
-    item.append(name, price, reference);
+    item.append(name, price, reference, locationElement(candidate));
     return item;
   }));
   alertDialog.hidden = false;
   document.querySelector("#confirm-alert").focus();
+}
+
+function locationElement(candidate) {
+  const container = document.createElement("div");
+  const label = document.createElement("small");
+  label.textContent = candidate.navigation
+    ? `商店位置：${candidate.location.mapName} ${candidate.location.x}/${candidate.location.y}`
+    : "商店位置：尚未取得商店位置";
+  container.append(label);
+  if (candidate.navigation) {
+    const button = document.createElement("button");
+    button.className = "secondary";
+    button.type = "button";
+    button.textContent = "複製導航指令";
+    button.addEventListener("click", async () => {
+      try {
+        await window.shopAlert.copyNavigation(candidate.navigation);
+        button.textContent = "已複製";
+      } catch { setStatus("複製失敗，請手動複製導航指令。", "error"); }
+    });
+    container.append(" ", button);
+  }
+  return container;
 }
 
 function closeAlert() {

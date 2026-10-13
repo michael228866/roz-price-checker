@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { MarketStore } = require("./store.cjs");
+const { DatabaseSync } = require("node:sqlite");
 const { fromVisibleRows } = require("./market.cjs");
 
 test("stores catalog, observations and one alert per event", () => {
@@ -51,6 +52,71 @@ test("P0 P1 P2 due keywords all receive slots and retry deadlines are respected"
     store.markDelivery(alert.alertKey, "pending", "HTTP_429",
       new Date(Date.now() + 60000).toISOString(), false);
     assert.equal(store.pendingAlerts().length, 0);
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("alert location is a per-event snapshot and never borrows a previous position", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-location-"));
+  const filename = path.join(directory, "market.sqlite");
+  const store = new MarketStore(filename);
+  try {
+    const base = { serverId: 529, shop: "Same Name", itemName: "Sword",
+      specification: "full-spec", specComplete: true, storeType: "販售",
+      price: 100, quantity: 1 };
+    const save = (location) => {
+      const item = { ...base, location };
+      return store.saveObservations(store.startRun(), [item], [{ ...item,
+        referencePrice: 1000, sampleCount: 3, confidence: "MEDIUM",
+        anomalyType: "POSSIBLE_MISSING_ZERO", ratio: 0.1 }]);
+    };
+    assert.equal(save({ mapName: "prontera", x: 162, y: 92,
+      source: "shop_detail_response", confidence: "MATCHED_SHOP_DETAIL" }).length, 1);
+    assert.equal(save({ mapName: "prontera", x: 120, y: 80,
+      source: "shop_detail_response", confidence: "MATCHED_SHOP_DETAIL" }).length, 1);
+    assert.equal(save({ mapName: "prontera", x: 1, y: 1,
+      source: "unconfirmed", confidence: "LOW" }).length, 1);
+    const alerts = store.pendingAlerts();
+    assert.deepEqual(alerts.map((alert) => [alert.mapName, alert.x, alert.y]),
+      [["prontera", 162, 92], ["prontera", 120, 80], [null, null, null]]);
+    assert.equal(store.db.prepare("SELECT location_map FROM listings LIMIT 1").get().location_map, null);
+  } finally {
+    store.close();
+  }
+  const reopened = new MarketStore(filename);
+  try { assert.equal(reopened.pendingAlerts().length, 3); }
+  finally {
+    reopened.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("legacy SQLite rows survive the additive location migration", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-legacy-"));
+  const filename = path.join(directory, "market.sqlite");
+  const legacy = new DatabaseSync(filename);
+  legacy.exec(`CREATE TABLE listings (
+    key TEXT PRIMARY KEY, server_id INTEGER NOT NULL, shop TEXT NOT NULL,
+    item_name TEXT NOT NULL, specification TEXT NOT NULL, price INTEGER NOT NULL,
+    quantity INTEGER NOT NULL, spec_complete INTEGER NOT NULL,
+    first_seen TEXT NOT NULL, last_seen TEXT NOT NULL);
+    CREATE TABLE price_alerts (
+    key TEXT PRIMARY KEY, listing_key TEXT NOT NULL REFERENCES listings(key),
+    type TEXT NOT NULL, price INTEGER NOT NULL, reference_price REAL NOT NULL,
+    confidence TEXT NOT NULL, created_at TEXT NOT NULL,
+    delivery_status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT, next_attempt_at TEXT);
+    INSERT INTO listings VALUES ('old', 529, 'Shop', 'Sword', 'spec', 100, 1, 1, '2026', '2026');
+    INSERT INTO price_alerts (key, listing_key, type, price, reference_price,
+      confidence, created_at) VALUES ('alert', 'old', 'LOW', 100, 1000, 'MEDIUM', '2026');`);
+  legacy.close();
+  const store = new MarketStore(filename);
+  try {
+    assert.equal(store.status().listings, 1);
+    assert.equal(store.pendingAlerts()[0].mapName, null);
+    assert.equal(store.db.prepare("SELECT key FROM price_alerts").get().key, "alert");
   } finally {
     store.close();
     fs.rmSync(directory, { recursive: true, force: true });

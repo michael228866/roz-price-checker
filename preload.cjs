@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("shopAlert", {
   marketStatus: () => ipcRenderer.invoke("market-status"),
   setDiscord: (url) => ipcRenderer.invoke("set-discord", url),
   discordStatus: () => ipcRenderer.invoke("discord-status"),
+  copyNavigation: (command) => ipcRenderer.invoke("copy-navigation", command),
   onStatus: (callback) => ipcRenderer.on("scan-status", (_event, value) => callback(value)),
   onState: (callback) => ipcRenderer.on("scan-state", (_event, value) => callback(value)),
   onResults: (callback) => ipcRenderer.on("scan-results", (_event, value) => callback(value)),

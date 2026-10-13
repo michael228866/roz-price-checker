@@ -22,3 +22,21 @@ test("HTTP 429 preserves the retry delay for the outbox", async () => {
       ok: false, status: 429, headers: { get: () => "2.5" }
     })), (error) => error.status === 429 && error.retryAfterMs === 2500);
 });
+
+test("Discord shows verified coordinates in a separate navigation code block", async () => {
+  const url = "https://discord.com/api/webhooks/123/Abc_123";
+  const alert = { itemName: "Sword", shop: "Same Name", price: 100,
+    referencePrice: 1000, type: "LOW", confidence: "MEDIUM",
+    location: { mapName: "prontera", x: 162, y: 92 } };
+  let content;
+  const mock = async (_url, options) => {
+    content = JSON.parse(options.body).content;
+    return { ok: true };
+  };
+  await sendDiscord(url, alert, mock);
+  assert.match(content, /商店位置：prontera 162\/92/);
+  assert.match(content, /導航指令：\n```text\n\/navi prontera 162\/92\n```/);
+  await sendDiscord(url, { ...alert, location: null }, mock);
+  assert.match(content, /尚未取得商店位置/);
+  assert.doesNotMatch(content, /\/navi/);
+});
