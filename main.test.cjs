@@ -40,7 +40,8 @@ test("resumes after human verification without losing completed keywords", async
     isDestroyed() { return false; }
   }
   const electron = {
-    app: { whenReady: () => Promise.resolve(), on() {}, getPath: () => directory },
+    app: { requestSingleInstanceLock: () => true,
+      whenReady: () => Promise.resolve(), on() {}, getPath: () => directory },
     BrowserWindow,
     ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
     Notification: { isSupported: () => false },
@@ -84,4 +85,19 @@ test("resumes after human verification without losing completed keywords", async
   handlers.get("stop-scanning")();
   await assert.rejects(handlers.get("resume-scanning")(), /沒有可繼續的掃描/);
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a second app instance quits before opening the shared user data", () => {
+  let quits = 0;
+  let readyCalls = 0;
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8"), {
+    require: (name) => name === "electron" ? {
+      app: { requestSingleInstanceLock: () => false, quit: () => { quits += 1; },
+        whenReady: () => { readyCalls += 1; return Promise.resolve(); } },
+      ipcMain: { handle() {} }
+    } : require(name),
+    __dirname
+  });
+  assert.equal(quits, 1);
+  assert.equal(readyCalls, 0);
 });

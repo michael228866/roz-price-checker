@@ -27,6 +27,9 @@ let discordWebhook = null;
 let activeProgress = null;
 let deliveryInProgress = false;
 let deliveryTimer;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) app.quit();
 
 function logEvent(code, details = {}) {
   if (!marketStore) return;
@@ -565,7 +568,14 @@ ipcMain.handle("copy-navigation", (_event, command) => {
   clipboard.writeText(command);
 });
 
-app.whenReady().then(() => {
+if (hasSingleInstanceLock) app.on("second-instance", () => {
+  if (appWindow && !appWindow.isDestroyed()) {
+    appWindow.show();
+    appWindow.focus();
+  }
+});
+
+if (hasSingleInstanceLock) app.whenReady().then(() => {
   marketStore = new MarketStore(path.join(app.getPath("userData"), "market.sqlite"));
   discordWebhook = loadWebhook();
   pausedScan = loadCheckpoint();
@@ -573,7 +583,7 @@ app.whenReady().then(() => {
   deliveryTimer = setInterval(() => deliverPendingAlerts().catch(() =>
     logEvent("DELIVERY_LOOP_FAILED")), 60000);
 });
-app.on("window-all-closed", () => {
+if (hasSingleInstanceLock) app.on("window-all-closed", () => {
   stopScanning();
   if (deliveryTimer) clearInterval(deliveryTimer);
   marketStore?.close();
