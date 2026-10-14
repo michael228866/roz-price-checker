@@ -248,6 +248,7 @@ async function runOneKeyword(keyword, generation, previous = [], history = []) {
   );
   if (result.error) throw new Error(result.error);
 
+  let lastState = null;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     await wait(500);
     if (generation !== scanGeneration) return [];
@@ -281,11 +282,13 @@ async function runOneKeyword(keyword, generation, previous = [], history = []) {
         });
       return { changed, loading, noResults, output, messageText };
     })()`);
+    lastState = state;
 
     if (state.messageText && /登入|驗證|圖形驗證|驗證碼/.test(state.messageText)) {
       throw new Error(`網站要求處理：${state.messageText}`);
     }
-    if (state.changed && !state.loading && (state.output.length > 0 || state.noResults) &&
+    if (state.changed && !state.loading &&
+        (state.output.length > 0 || state.noResults || captured.response?.items?.length === 0) &&
         captured.status === "ready" && matchesVisible(state.output, captured.response)) {
       await shopWindow.webContents.executeJavaScript("window.__shopResultObserver?.disconnect()");
       const visible = state.output.map((listing) => ({ ...listing, keyword }));
@@ -325,7 +328,19 @@ async function runOneKeyword(keyword, generation, previous = [], history = []) {
         reportedCount: page.reportedCount };
     }
   }
-  throw new Error(`「${keyword}」查詢逾時。若網站顯示人工驗證，請先在查詢頁完成驗證後再開始掃描。`);
+  const captured = capture.peek();
+  logEvent("SEARCH_TIMEOUT", { searchRequests: captured.searchRequests,
+    matchedRequests: captured.matchedRequests,
+    unreadableRequests: captured.unreadableRequests,
+    captureStatus: captured.status, domChanged: lastState?.changed ?? false,
+    visibleRows: lastState?.output?.length ?? 0 });
+  const reason = !captured.searchRequests ? "頁面未送出搜尋請求，請檢查登入與圖形驗證" :
+    captured.unreadableRequests ? "無法讀取搜尋請求以核對關鍵字" :
+    !captured.matchedRequests ? "搜尋請求的關鍵字與本輪不符" :
+    captured.status === "ready" && !matchesVisible(lastState?.output ?? [], captured.response)
+      ? "搜尋回應與畫面資料不一致" :
+    !lastState?.changed ? "搜尋結果畫面未更新" : "網站尚未完成搜尋";
+  throw new Error(`「${keyword}」查詢逾時：${reason}。請在查詢頁確認後再繼續。`);
   } finally {
     capture.close();
   }
@@ -425,7 +440,7 @@ async function scan(resumeState = null) {
     if (progress?.catalogDue?.includes(progress.keywords[progress.nextIndex])) {
       marketStore.markKeyword(progress.keywords[progress.nextIndex], false);
     }
-    if (progress && /登入|驗證|驗證碼|查詢逾時/.test(error.message)) {
+    if (progress && /登入|驗證|驗證碼/.test(error.message)) {
       if (scanTimer) clearInterval(scanTimer);
       scanTimer = null;
       pausedScan = progress;
@@ -450,7 +465,7 @@ async function scan(resumeState = null) {
     activeProgress = null;
     stopScanning();
     logEvent(status, { runId: progress?.runId ?? null });
-    sendStatus(`${error.message} 自動掃描已暫停。`, "error");
+    sendStatus(`${error.message} 自動掃描已停止。`, "error");
   } finally {
     scanInProgress = false;
   }

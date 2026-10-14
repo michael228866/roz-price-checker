@@ -16,33 +16,16 @@ async function captureShopResponse(webContents, keyword) {
   let armed = false;
   let closed = false;
   let count = 0;
+  let searchRequests = 0;
+  let unreadableRequests = 0;
   let response = null;
   let status = "pending";
-  const onMessage = async (_event, method, params) => {
-    if (closed || !armed) return;
-    if (method === "Network.requestWillBeSent" && /forAjax_shopDeal/i.test(params.request?.url ?? "")) {
-      let requestUrl;
-      try { requestUrl = new URL(params.request.url); } catch { return; }
-      if (requestUrl.origin !== "https://event.gnjoy.com.tw") return;
-      const body = params.request.postData;
-      if (params.request.method !== "POST" || typeof body !== "string") return;
-      let requestedKeyword;
-      try { requestedKeyword = JSON.parse(body).txb_KeyWord; }
-      catch { return; }
-      if (requestedKeyword !== keyword) return;
-      count += 1;
-      if (count > 1) status = "ambiguous";
-      requests.set(params.requestId, { status: null, headers: {} });
-    }
-    const request = requests.get(params.requestId);
-    if (!request) return;
-    if (method === "Network.responseReceived") {
-      request.status = params.response.status;
-      request.headers = params.response.headers ?? {};
-    }
-    if (method !== "Network.loadingFinished") return;
-    requests.delete(params.requestId);
+  const finishRequest = async (requestId, request) => {
+    if (!request.matched || (!request.finished && !request.failed) ||
+        closed || status === "ambiguous") return;
+    requests.delete(requestId);
     if (count !== 1) return;
+    if (request.failed) { status = "invalid"; return; }
     if (request.status === 403 || request.status === 429) {
       const retryAfter = Object.entries(request.headers).find(([name]) => name.toLowerCase() === "retry-after")?.[1];
       response = { rateLimited: true, retryAfter };
@@ -51,12 +34,61 @@ async function captureShopResponse(webContents, keyword) {
     }
     if (request.status !== 200) { status = "invalid"; return; }
     try {
-      const result = await debuggerApi.sendCommand("Network.getResponseBody", { requestId: params.requestId });
+      const result = await debuggerApi.sendCommand("Network.getResponseBody", { requestId });
+      if (closed || status === "ambiguous") return;
       const body = result.base64Encoded
         ? Buffer.from(result.body, "base64").toString("utf8") : result.body;
       response = parseResponse(JSON.parse(body), { keyword });
       status = response.errors.length ? "invalid" : "ready";
     } catch { status = "invalid"; }
+  };
+  const onMessage = async (_event, method, params) => {
+    if (closed || !armed) return;
+    if (method === "Network.requestWillBeSent") {
+      let requestUrl;
+      try { requestUrl = new URL(params.request.url); } catch { return; }
+      if (requestUrl.origin !== "https://event.gnjoy.com.tw" ||
+          !requestUrl.pathname.endsWith("/forAjax_shopDeal") ||
+          params.request.method !== "POST") return;
+      searchRequests += 1;
+      const request = { status: null, headers: {}, matched: false, finished: false, failed: false };
+      requests.set(params.requestId, request);
+      let body = params.request.postData;
+      if (typeof body !== "string") {
+        try {
+          body = (await debuggerApi.sendCommand("Network.getRequestPostData",
+            { requestId: params.requestId })).postData;
+        } catch {
+          unreadableRequests += 1;
+          requests.delete(params.requestId);
+          return;
+        }
+      }
+      if (closed) return;
+      let requestedKeyword;
+      try { requestedKeyword = JSON.parse(body).txb_KeyWord; }
+      catch { requests.delete(params.requestId); return; }
+      if (requestedKeyword !== keyword) { requests.delete(params.requestId); return; }
+      request.matched = true;
+      count += 1;
+      if (count > 1) status = "ambiguous";
+      await finishRequest(params.requestId, request);
+      return;
+    }
+    const request = requests.get(params.requestId);
+    if (!request) return;
+    if (method === "Network.responseReceived") {
+      request.status = params.response.status;
+      request.headers = params.response.headers ?? {};
+    }
+    if (method === "Network.loadingFailed") {
+      request.failed = true;
+      await finishRequest(params.requestId, request);
+      return;
+    }
+    if (method !== "Network.loadingFinished") return;
+    request.finished = true;
+    await finishRequest(params.requestId, request);
   };
   try {
     debuggerApi.attach("1.3");
@@ -68,7 +100,8 @@ async function captureShopResponse(webContents, keyword) {
   }
   return {
     arm() { armed = true; },
-    peek() { return { status, response }; },
+    peek() { return { status, response, searchRequests, matchedRequests: count,
+      unreadableRequests }; },
     close() {
       closed = true;
       debuggerApi.removeListener("message", onMessage);

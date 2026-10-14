@@ -46,6 +46,42 @@ test("matches only the armed search request and its own response", async () => {
   capture.close();
 });
 
+test("matches search when CDP omits postData from the first event", async () => {
+  const debuggerApi = new EventEmitter();
+  let attached = false;
+  let releaseBody;
+  debuggerApi.isAttached = () => attached;
+  debuggerApi.attach = () => { attached = true; };
+  debuggerApi.detach = () => { attached = false; };
+  debuggerApi.sendCommand = async (command) => {
+    if (command === "Network.getRequestPostData") {
+      await new Promise((resolve) => { releaseBody = resolve; });
+      return { postData: JSON.stringify({ txb_KeyWord: "Wanted" }) };
+    }
+    if (command === "Network.getResponseBody") {
+      return { body: JSON.stringify({ dt: [{ storeName: "A", itemName: "Wanted",
+        itemPrice: 100, itemCNT: 1 }], dt2: [{ count: 1 }] }) };
+    }
+    return {};
+  };
+  const capture = await captureShopResponse({ debugger: debuggerApi }, "Wanted");
+  capture.arm();
+  debuggerApi.emit("message", null, "Network.requestWillBeSent", {
+    requestId: "late-body", request: { method: "POST",
+      url: "https://event.gnjoy.com.tw/RoZ/RoZ_ShopSearch/forAjax_shopDeal" }
+  });
+  debuggerApi.emit("message", null, "Network.responseReceived", {
+    requestId: "late-body", response: { status: 200 }
+  });
+  debuggerApi.emit("message", null, "Network.loadingFinished", { requestId: "late-body" });
+  assert.equal(capture.peek().status, "pending");
+  releaseBody();
+  await new Promise(setImmediate);
+  assert.equal(capture.peek().status, "ready");
+  assert.equal(capture.peek().matchedRequests, 1);
+  capture.close();
+});
+
 test("shop details bind coordinates to the clicked SSI and exact listing", async () => {
   const debuggerApi = new EventEmitter();
   let attached = false;
