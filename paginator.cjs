@@ -6,16 +6,23 @@ async function collectPages(fetchPage, { maxPages = 20 } = {}) {
   let reportedCount = null;
   for (let page = 1; page <= maxPages; page += 1) {
     const result = await fetchPage(page);
+    if (!result || !Array.isArray(result.items)) throw new Error(`第 ${page} 頁資料無效`);
     const pageFingerprint = JSON.stringify(result?.items?.map((item) =>
-      [item.shop, item.itemName, item.specification, item.price, item.quantity]));
+      [item.serverId, item.shop, item.ssi, item.itemName, item.specification,
+        item.price, item.quantity]));
     if (seenPages.has(pageFingerprint)) {
       return { items, reportedCount, pageCount: page, status: "PARTIAL" };
     }
     seenPages.add(pageFingerprint);
-    if (!result || !Array.isArray(result.items)) throw new Error(`第 ${page} 頁資料無效`);
-    if (result.reportedCount !== null && result.reportedCount !== undefined) reportedCount = result.reportedCount;
+    if (result.reportedCount !== null && result.reportedCount !== undefined) {
+      if (reportedCount !== null && reportedCount !== result.reportedCount) {
+        return { items, reportedCount, pageCount: page, status: "PARTIAL" };
+      }
+      reportedCount = result.reportedCount;
+    }
     for (const item of result.items) {
-      const key = JSON.stringify([item.shop, item.specification, item.price, item.quantity]);
+      const key = JSON.stringify([item.serverId, item.shop, item.ssi ?? item.observationKey,
+        item.itemName, item.specification, item.price, item.quantity]);
       if (!seen.has(key)) { seen.add(key); items.push(item); }
     }
     if (result.hasNext === false) {

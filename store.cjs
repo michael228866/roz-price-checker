@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
-const { listingKey, listingVersion } = require("./market.cjs");
+const { SERVER_ID, listingKey, listingVersion } = require("./market.cjs");
 const { navigationCommand } = require("./shop_location.cjs");
 
 function verifiedLocation(item) {
@@ -64,10 +64,23 @@ class MarketStore {
         name TEXT PRIMARY KEY, tier TEXT NOT NULL, last_attempt_at TEXT,
         last_success_at TEXT, attempts INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS active_listing_refs (
+        keyword TEXT NOT NULL, listing_key TEXT NOT NULL, version_key TEXT NOT NULL,
+        expires_at TEXT NOT NULL, PRIMARY KEY (keyword, listing_key)
+      );
+      CREATE INDEX IF NOT EXISTS active_listing_refs_expiry ON active_listing_refs(expires_at);
+      CREATE TABLE IF NOT EXISTS sale_transactions (
+        id TEXT PRIMARY KEY, server_id INTEGER NOT NULL, specification TEXT NOT NULL,
+        price INTEGER NOT NULL, quantity INTEGER NOT NULL, sold_at TEXT NOT NULL,
+        source TEXT NOT NULL
+      );
     `);
     const columns = this.db.prepare("PRAGMA table_info(price_alerts)").all().map((column) => column.name);
     if (!columns.includes("next_attempt_at")) {
       this.db.exec("ALTER TABLE price_alerts ADD COLUMN next_attempt_at TEXT");
+    }
+    if (!columns.includes("sample_count")) {
+      this.db.exec("ALTER TABLE price_alerts ADD COLUMN sample_count INTEGER");
     }
     for (const table of ["listings", "price_alerts"]) {
       const existing = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all()
@@ -130,8 +143,8 @@ class MarketStore {
 
   historicalReferences(maxAgeHours = 72, now = new Date()) {
     const cutoff = new Date(now.getTime() - maxAgeHours * 3600000).toISOString();
-    const rows = this.db.prepare(`SELECT * FROM listing_versions WHERE last_seen >= ? AND spec_complete=1
-      ORDER BY last_seen DESC`).all(cutoff);
+    const rows = this.db.prepare(`SELECT * FROM listing_versions WHERE last_seen >= ?
+      AND server_id=? AND spec_complete=1 ORDER BY last_seen DESC`).all(cutoff, SERVER_ID);
     const seen = new Set();
     return rows.filter((row) => {
       if (seen.has(row.listing_key)) return false;
@@ -139,7 +152,37 @@ class MarketStore {
       return true;
     }).map((row) => ({ serverId: row.server_id, shop: row.shop,
       itemName: row.item_name, specification: row.specification,
-      price: row.price, quantity: row.quantity, specComplete: true, storeType: "販售" }));
+      price: row.price, quantity: row.quantity, specComplete: true,
+      storeType: "販售", marketKind: "ASK_HISTORY" }));
+  }
+
+  activeReferences(now = new Date()) {
+    return this.db.prepare(`SELECT v.* FROM active_listing_refs a
+      JOIN listing_versions v ON v.key=a.version_key
+      WHERE a.expires_at > ? AND v.server_id=? AND v.spec_complete=1
+      ORDER BY v.last_seen DESC`).all(now.toISOString(), SERVER_ID)
+      .filter((row, index, rows) => rows.findIndex((other) =>
+        other.listing_key === row.listing_key) === index)
+      .map((row) => ({ serverId: row.server_id, shop: row.shop,
+        itemName: row.item_name, specification: row.specification,
+        price: row.price, quantity: row.quantity, specComplete: true,
+        storeType: "販售", marketKind: "ACTIVE_ASK", observationKey: row.listing_key }));
+  }
+
+  transactionReferences() {
+    return this.db.prepare(`SELECT server_id AS serverId, specification, price,
+      quantity, sold_at AS soldAt, source FROM sale_transactions WHERE server_id=?`)
+      .all(SERVER_ID).map((row) => ({ ...row, marketKind: "SALE_HISTORY" }));
+  }
+
+  unseenCandidates(analyses, maxAlertRatio = 0.15) {
+    const exists = this.db.prepare("SELECT 1 FROM price_alerts WHERE key=?");
+    return analyses.filter((item) => {
+      if (item.serverId !== SERVER_ID || item.confidence === "INSUFFICIENT" ||
+          item.sampleCount < 3 || item.anomalyType === "NORMAL" ||
+          item.ratio > maxAlertRatio) return false;
+      return !exists.get(`${listingVersion(item)}:${item.anomalyType}`);
+    });
   }
 
   startRun() {
@@ -154,7 +197,11 @@ class MarketStore {
         metrics.listings ?? 0, metrics.paginationStatus ?? "PAGINATION_UNVERIFIED", error, id);
   }
 
-  saveObservations(runId, items, analyses, { maxAlertRatio = 0.15 } = {}) {
+  saveObservations(runId, items, analyses, { maxAlertRatio = 0.15,
+    scannedKeywords = [] } = {}) {
+    if ([...items, ...analyses].some((item) => item.serverId !== SERVER_ID)) {
+      throw new Error(`只允許 Server ID ${SERVER_ID}`);
+    }
     const now = new Date().toISOString();
     const upsert = this.db.prepare(`INSERT INTO listings
       (key, server_id, shop, item_name, specification, price, quantity, spec_complete, first_seen, last_seen,
@@ -176,11 +223,16 @@ class MarketStore {
       (run_id, listing_key, reference_price, sample_count, confidence) VALUES (?, ?, ?, ?, ?)`);
     const alert = this.db.prepare(`INSERT OR IGNORE INTO price_alerts
       (key, listing_key, type, price, reference_price, confidence, created_at,
-       location_map, location_x, location_y, location_source, location_confidence)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+       location_map, location_x, location_y, location_source, location_confidence,
+       sample_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const removeActive = this.db.prepare("DELETE FROM active_listing_refs WHERE keyword=?");
+    const active = this.db.prepare(`INSERT OR REPLACE INTO active_listing_refs
+      (keyword, listing_key, version_key, expires_at) VALUES (?, ?, ?, ?)`);
     const fresh = [];
     this.db.exec("BEGIN");
     try {
+      for (const keyword of scannedKeywords) removeActive.run(keyword);
       for (const item of items) {
         const key = listingKey(item);
         const location = verifiedLocation(item);
@@ -193,6 +245,10 @@ class MarketStore {
         version.run(versionKey, key, item.serverId, item.shop, item.itemName,
           item.specification, item.price, item.quantity, item.specComplete ? 1 : 0, now, now);
         versionSnapshot.run(runId, versionKey, now);
+        if (scannedKeywords.includes(item.keyword) && item.specComplete) {
+          active.run(item.keyword, key, versionKey,
+            new Date(Date.now() + 15 * 60000).toISOString());
+        }
       }
       for (const item of analyses) {
         const key = listingKey(item);
@@ -200,12 +256,13 @@ class MarketStore {
         if (item.confidence === "INSUFFICIENT" || item.sampleCount < 3 ||
             item.anomalyType === "NORMAL" || item.ratio > maxAlertRatio) continue;
         const location = verifiedLocation(item);
-        const alertKey = `${listingVersion(item)}:${item.anomalyType}${location
-          ? `:${location.mapName}:${location.x}:${location.y}` : ""}`;
+        const alertKey = `${listingVersion(item)}:${item.anomalyType}`;
         if (alert.run(alertKey, key, item.anomalyType, item.price, item.referencePrice,
           item.confidence, now, location?.mapName ?? null, location?.x ?? null,
           location?.y ?? null, location?.source ?? null,
-          location?.confidence ?? null).changes) fresh.push({ ...item, location, alertKey });
+          location?.confidence ?? null, item.sampleCount).changes) {
+          fresh.push({ ...item, location, alertKey });
+        }
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -216,6 +273,9 @@ class MarketStore {
   }
 
   saveVisibleAlerts(items) {
+    if (items.some((item) => item.serverId !== SERVER_ID)) {
+      throw new Error(`只允許 Server ID ${SERVER_ID}`);
+    }
     const statement = this.db.prepare(`INSERT OR IGNORE INTO price_alerts
       (key, listing_key, type, price, reference_price, confidence, created_at)
       VALUES (?, ?, 'VISIBLE_PAGE_LOW_PRICE', ?, ?, 'LOW', ?)`);
@@ -232,13 +292,14 @@ class MarketStore {
 
   pendingAlerts(limit = 20) {
     return this.db.prepare(`SELECT a.key, a.type, a.price, a.reference_price AS referencePrice,
-      a.confidence, a.attempts, l.item_name AS itemName, l.shop,
+      a.confidence, a.sample_count AS sampleCount, a.attempts,
+      l.item_name AS itemName, l.shop,
       a.location_map AS mapName, a.location_x AS x, a.location_y AS y,
       a.location_source AS locationSource, a.location_confidence AS locationConfidence
       FROM price_alerts a JOIN listings l ON l.key=a.listing_key
-      WHERE a.delivery_status='pending' AND a.attempts < 3 AND
+      WHERE l.server_id=? AND a.delivery_status='pending' AND a.attempts < 3 AND
       (a.next_attempt_at IS NULL OR a.next_attempt_at <= ?)
-      ORDER BY a.created_at LIMIT ?`).all(new Date().toISOString(), limit);
+      ORDER BY a.created_at LIMIT ?`).all(SERVER_ID, new Date().toISOString(), limit);
   }
 
   markDelivery(key, status, error = null, nextAttemptAt = null, countAttempt = true) {
@@ -250,8 +311,11 @@ class MarketStore {
   status() {
     return {
       catalog: this.db.prepare("SELECT COUNT(*) AS count FROM catalog").get().count,
-      listings: this.db.prepare("SELECT COUNT(*) AS count FROM listings").get().count,
-      pendingAlerts: this.db.prepare("SELECT COUNT(*) AS count FROM price_alerts WHERE delivery_status='pending'").get().count,
+      listings: this.db.prepare("SELECT COUNT(*) AS count FROM listings WHERE server_id=?")
+        .get(SERVER_ID).count,
+      pendingAlerts: this.db.prepare(`SELECT COUNT(*) AS count FROM price_alerts a
+        JOIN listings l ON l.key=a.listing_key WHERE l.server_id=?
+        AND a.delivery_status='pending'`).get(SERVER_ID).count,
       coverage: this.db.prepare(`SELECT COUNT(*) AS known,
         SUM(CASE WHEN last_success_at IS NOT NULL THEN 1 ELSE 0 END) AS scanned
         FROM search_keywords`).get(),

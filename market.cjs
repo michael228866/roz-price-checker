@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const { parseShopLocation } = require("./shop_location.cjs");
+const SERVER_ID = 529;
 
 const specificationFields = [
   "itemName", "itemRefining", "ItemGradeLevel", "DefaultSlotCount",
@@ -25,13 +26,18 @@ function displayName(row) {
   return parts.join(" ").trim();
 }
 
-function parseResponse(payload, { keyword = "", serverId = 529 } = {}) {
+function parseResponse(payload, { keyword = "", serverId = SERVER_ID } = {}) {
+  if (serverId !== SERVER_ID) throw new Error(`只允許 Server ID ${SERVER_ID}`);
   if (!payload || !Array.isArray(payload.dt)) throw new Error("查詢回應缺少 dt 掛單陣列");
   const items = [];
   const errors = [];
   for (const [index, row] of payload.dt.entries()) {
     const price = row?.itemPrice;
     const quantity = row?.itemCNT;
+    if (row?.serverId != null && Number(row.serverId) !== SERVER_ID) {
+      errors.push(`dt[${index}] 伺服器不符`);
+      continue;
+    }
     if (!row || typeof row.itemName !== "string" || !row.itemName.trim() ||
         !Number.isSafeInteger(price) || price <= 0 ||
         !Number.isSafeInteger(quantity) || quantity <= 0) {
@@ -57,7 +63,8 @@ function parseResponse(payload, { keyword = "", serverId = 529 } = {}) {
   };
 }
 
-function fromVisibleRows(rows, keyword, serverId = 529) {
+function fromVisibleRows(rows, keyword, serverId = SERVER_ID) {
+  if (serverId !== SERVER_ID) throw new Error(`只允許 Server ID ${SERVER_ID}`);
   return rows.filter((row) => row.storeType === "販售" &&
     Number.isSafeInteger(row.price) && row.price > 0 &&
     Number.isSafeInteger(row.quantity) && row.quantity > 0 && row.itemName)
@@ -87,7 +94,7 @@ function median(values) {
 function listingIdentity(item) {
   return crypto.createHash("sha256").update(JSON.stringify([
     item.serverId, item.shop, item.specification,
-    item.verifiedListingId === true ? item.listingId : null
+    item.ssi ?? item.observationKey ?? null
   ])).digest("hex");
 }
 
@@ -96,7 +103,9 @@ function analyze(items, history = []) {
   const latest = new Map();
   for (const item of [...history, ...items]) {
     if (!Number.isSafeInteger(item.price) || item.price <= 0 ||
-        item.storeType !== "販售" || !item.specComplete || !item.shop) continue;
+        item.serverId !== SERVER_ID || item.marketKind === "ASK_HISTORY" ||
+        item.marketKind === "SALE_HISTORY" || item.storeType !== "販售" ||
+        !item.specComplete || !item.shop) continue;
     latest.set(listingIdentity(item), item);
   }
   for (const item of latest.values()) {
@@ -138,5 +147,5 @@ function listingVersion(item) {
   ])).digest("hex");
 }
 
-module.exports = { fingerprint, parseResponse, fromVisibleRows, analyze,
+module.exports = { SERVER_ID, fingerprint, parseResponse, fromVisibleRows, analyze,
   listingKey, listingIdentity, listingVersion };

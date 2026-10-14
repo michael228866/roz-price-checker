@@ -40,3 +40,19 @@ test("Discord shows verified coordinates in a separate navigation code block", a
   assert.match(content, /尚未取得商店位置/);
   assert.doesNotMatch(content, /\/navi/);
 });
+
+test("notification distinguishes high-confidence and ordinary bargains", async () => {
+  let content;
+  const send = async (_url, options) => {
+    content = JSON.parse(options.body).content;
+    return { ok: true };
+  };
+  const alert = { itemName: "Sword", shop: "Shop", price: 100,
+    referencePrice: 1000, type: "POSSIBLE_MISSING_ZERO", confidence: "HIGH",
+    sampleCount: 5 };
+  await sendDiscord("https://discord.com/api/webhooks/123/Abc_123", alert, send);
+  assert.match(content, /高信心低價/);
+  await sendDiscord("https://discord.com/api/webhooks/123/Abc_123",
+    { ...alert, confidence: "MEDIUM", sampleCount: 3 }, send);
+  assert.match(content, /一般低價/);
+});

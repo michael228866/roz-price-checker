@@ -17,7 +17,7 @@ async function sendDiscord(url, alert, fetchImpl = fetch) {
   const locationText = navigation
     ? `${location.mapName} ${location.x}/${location.y}` : UNKNOWN_LOCATION;
   const body = {
-    content: `🚨 ROZ 疑似低價\n商品：${alert.itemName}\n商店：${alert.shop}\n價格：${alert.price.toLocaleString()} Z\n參考價：${alert.referencePrice.toLocaleString()} Z\n類型：${alert.type}\n可信度：${alert.confidence}\n商店位置：${locationText}${navigation ? `\n導航指令：\n\`\`\`text\n${navigation}\n\`\`\`` : ""}\n${shopUrl}`,
+    content: `🚨 ROZ ${alert.confidence === "HIGH" && alert.sampleCount >= 5 ? "高信心低價" : "一般低價"}\n商品：${alert.itemName}\n商店：${alert.shop}\n價格：${alert.price.toLocaleString()} Z\n參考價：${alert.referencePrice.toLocaleString()} Z\n樣本數：${alert.sampleCount ?? 0}\n類型：${alert.type}\n可信度：${alert.confidence}\n商店位置：${locationText}${navigation ? `\n導航指令：\n\`\`\`text\n${navigation}\n\`\`\`` : ""}\n${shopUrl}`,
     allowed_mentions: { parse: [] }
   };
   const response = await fetchImpl(url, {

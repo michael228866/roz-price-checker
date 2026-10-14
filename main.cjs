@@ -1,13 +1,13 @@
 const { app, BrowserWindow, ipcMain, Notification, safeStorage, clipboard } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const { fromVisibleRows, analyze, listingKey } = require("./market.cjs");
+const { SERVER_ID, fromVisibleRows, analyze } = require("./market.cjs");
 const { MarketStore } = require("./store.cjs");
 const { parseCsv } = require("./catalog.cjs");
 const { validWebhook, sendDiscord } = require("./discord.cjs");
-const { captureShopResponse, captureShopLocation, enrichVisibleRows, matchesVisible } = require("./capture.cjs");
-const { collectPages } = require("./paginator.cjs");
+const { scanKeywordPages } = require("./shop_scanner.cjs");
 const { navigationCommand } = require("./shop_location.cjs");
+const { planKeywords } = require("./keyword_plan.cjs");
 
 const shopUrl = "https://event.gnjoy.com.tw/RoZ/RoZ_ShopSearch";
 const keywordDelayMs = 3000;
@@ -22,6 +22,7 @@ let watchedKeywords = [];
 let includeHotKeywords = false;
 let thresholdRatio = 0.15;
 let includeCatalog = false;
+let manualCursor = 0;
 let marketStore;
 let discordWebhook = null;
 let activeProgress = null;
@@ -182,24 +183,16 @@ async function getScanKeywords() {
     }
   }
 
-  const allKeywords = [...watchedKeywords];
-  let catalogDue = [];
-  if (includeCatalog) {
-    const slots = Math.max(0, 20 - new Set(allKeywords).size);
-    if (slots) {
-      catalogDue = marketStore.dueCatalog(slots).map((item) => item.name);
-      allKeywords.push(...catalogDue);
-    }
-  }
-  allKeywords.push(...hotKeywords);
-  const uniqueKeywords = [...new Set(allKeywords)];
-  if (!uniqueKeywords.length && !includeCatalog) throw new Error("請輸入關鍵字或匯入商品索引。");
-  const maxKeywords = 20;
+  const catalog = includeCatalog ? marketStore.dueCatalog(20).map((item) => item.name) : [];
+  const plan = planKeywords({ manual: watchedKeywords, catalog,
+    hot: hotKeywords, cursor: manualCursor });
+  if (!plan.keywords.length && !includeCatalog) throw new Error("請輸入關鍵字或匯入商品索引。");
+  manualCursor = plan.nextCursor;
   return {
-    keywords: uniqueKeywords.slice(0, maxKeywords),
-    wasCapped: uniqueKeywords.length > maxKeywords,
+    keywords: plan.keywords,
+    wasCapped: plan.wasCapped,
     hotKeywordCount: hotKeywords.length,
-    catalogDue
+    catalogDue: plan.catalogDue
   };
 }
 
@@ -207,150 +200,9 @@ function toObservation(row) {
   return fromVisibleRows([row], row.keyword).map((item) => ({
     ...item, specification: row.specification ?? item.specification,
     specComplete: row.specComplete === true, source: row.source ?? item.source,
-    ssi: row.ssi ?? null, location: row.location ?? null
+    ssi: row.ssi ?? null, observationKey: row.observationKey ?? null,
+    location: row.location ?? null
   }));
-}
-
-async function runOneKeyword(keyword, generation, previous = [], history = []) {
-  const capture = await captureShopResponse(shopWindow.webContents, keyword);
-  if (!capture) throw new Error("無法驗證本次查詢的回應，已停止掃描。");
-  try {
-  capture.arm();
-  const result = await shopWindow.webContents.executeJavaScript(
-    `(() => {
-      const loginButton = document.querySelector('#a_searchBtn');
-      if (!loginButton || loginButton.textContent.includes('請先登入')) {
-        return { error: '請先在查詢頁登入，並完成網站要求的驗證。' };
-      }
-
-      const server = document.querySelector('#div_svr');
-      const selectedServer = server?.getAttribute('_val');
-      if (!selectedServer || selectedServer === '0') {
-        const option = document.querySelector('.selectSrv li[value="529"]');
-        if (!server || !option) return { error: '找不到伺服器選項，請確認查詢頁正常載入。' };
-        server.click();
-        option.click();
-      }
-
-      const input = document.querySelector('#txb_KeyWord');
-      const body = document.querySelector('#_tbody');
-      const searchButton = document.querySelector('#searchBtn');
-      if (!input || !body || !searchButton) return { error: '找不到查詢欄位或結果區。' };
-      window.__shopResultChanged = false;
-      window.__shopResultObserver?.disconnect();
-      window.__shopResultObserver = new MutationObserver(() => { window.__shopResultChanged = true; });
-      window.__shopResultObserver.observe(body, { childList: true, subtree: true, characterData: true });
-      const noResults = document.querySelector('#PoringCry1');
-      if (noResults) window.__shopResultObserver.observe(noResults, { attributes: true, childList: true, subtree: true });
-      input.value = ${JSON.stringify(keyword)};
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      searchButton.click();
-      return { started: true };
-    })()`
-  );
-  if (result.error) throw new Error(result.error);
-
-  let lastState = null;
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    await wait(500);
-    if (generation !== scanGeneration) return [];
-    const captured = capture.peek();
-    if (captured.response?.rateLimited) throw new Error("網站限制查詢（HTTP 403/429），掃描已停止。");
-    if (captured.status === "ambiguous" || captured.status === "invalid") {
-      throw new Error("查詢回應無法可靠配對，已停止掃描。");
-    }
-    const state = await shopWindow.webContents.executeJavaScript(`(() => {
-      const message = document.querySelector('.swal2-html-container, .swal2-content');
-      const messageText = message?.textContent?.trim() || '';
-      const rows = Array.from(document.querySelectorAll('#_tbody tr'));
-      const changed = window.__shopResultChanged === true;
-      const loading = rows.some(row => row.textContent.includes('請稍候'));
-      const noResultsElement = document.querySelector('#PoringCry1');
-      const noResults = !!noResultsElement && noResultsElement.offsetParent !== null;
-      const output = rows
-        .filter(row => row.querySelectorAll('td').length >= 6)
-        .map((row, rowIndex) => {
-          const cells = Array.from(row.querySelectorAll('td')).map(cell => cell.textContent.trim());
-          return {
-            rowIndex,
-            ssi: row.querySelector('.shopName')?.getAttribute('SSI') || null,
-            shop: cells[0],
-            itemName: cells[1],
-            slots: cells[2],
-            price: Number(cells[3].replace(/[^0-9]/g, '')),
-            quantity: Number(cells[4].replace(/[^0-9]/g, '')),
-            storeType: cells[5]
-          };
-        });
-      return { changed, loading, noResults, output, messageText };
-    })()`);
-    lastState = state;
-
-    if (state.messageText && /登入|驗證|圖形驗證|驗證碼/.test(state.messageText)) {
-      throw new Error(`網站要求處理：${state.messageText}`);
-    }
-    if (state.changed && !state.loading &&
-        (state.output.length > 0 || state.noResults || captured.response?.items?.length === 0) &&
-        captured.status === "ready" && matchesVisible(state.output, captured.response)) {
-      await shopWindow.webContents.executeJavaScript("window.__shopResultObserver?.disconnect()");
-      const visible = state.output.map((listing) => ({ ...listing, keyword }));
-      const page = await collectPages(async () => ({
-        items: enrichVisibleRows(visible, captured.response),
-        reportedCount: captured.response.reportedCount, hasNext: null
-      }), { maxPages: 1 });
-      capture.close();
-      const provisional = analyze([...previous, ...page.items.flatMap(toObservation)], history)
-        .filter((item) => item.sampleCount >= 3 && item.ratio <= thresholdRatio);
-      const targetKeys = new Set(provisional.map(listingKey));
-      for (const row of page.items) {
-        if (generation !== scanGeneration) break;
-        const [item] = toObservation(row);
-        if (!item || !row.ssi || !targetKeys.has(listingKey(item))) continue;
-        try {
-          const request = { rowIndex: row.rowIndex, ssi: row.ssi, shop: row.shop,
-            price: row.price, quantity: row.quantity };
-          row.location = await captureShopLocation(shopWindow.webContents,
-            { ...row, serverId: 529 }, () => shopWindow.webContents.executeJavaScript(`(() => {
-              const target = ${JSON.stringify(request)};
-              const tr = document.querySelectorAll('#_tbody tr')[target.rowIndex];
-              const shop = tr?.querySelector('.shopName');
-              const cells = tr ? Array.from(tr.querySelectorAll('td')).map(td => td.textContent.trim()) : [];
-              if (!shop || shop.getAttribute('SSI') !== target.ssi ||
-                  cells[0] !== target.shop ||
-                  Number(cells[3].replace(/[^0-9]/g, '')) !== target.price ||
-                  Number(cells[4].replace(/[^0-9]/g, '')) !== target.quantity) return false;
-              shop.click();
-              return true;
-            })()`));
-          await shopWindow.webContents.executeJavaScript(
-            "document.querySelector('.popup__itemInfo .close')?.click()");
-        } catch (error) { logEvent("SHOP_LOCATION_FAILED", { reason: error.message }); }
-      }
-      return { rows: page.items, status: page.status, pageCount: page.pageCount,
-        reportedCount: page.reportedCount };
-    }
-  }
-  const captured = capture.peek();
-  const visibleRows = lastState?.output ?? [];
-  const responseRows = captured.response?.items ?? [];
-  const matchingSsi = visibleRows.filter((row) => row.ssi &&
-    responseRows.some((item) => item.ssi === row.ssi)).length;
-  logEvent("SEARCH_TIMEOUT", { searchRequests: captured.searchRequests,
-    matchedRequests: captured.matchedRequests,
-    unreadableRequests: captured.unreadableRequests,
-    captureStatus: captured.status, domChanged: lastState?.changed ?? false,
-    visibleRows: visibleRows.length, responseRows: responseRows.length, matchingSsi });
-  const reason = !captured.searchRequests ? "頁面未送出搜尋請求，請檢查登入與圖形驗證" :
-    captured.unreadableRequests ? "無法讀取搜尋請求以核對關鍵字" :
-    !captured.matchedRequests ? "搜尋請求的關鍵字與本輪不符" :
-    captured.status === "ready" && !matchesVisible(visibleRows, captured.response)
-      ? `搜尋回應與畫面資料不一致（回應 ${responseRows.length} 筆、畫面 ${visibleRows.length} 筆、商店識別相符 ${matchingSsi} 筆）` :
-    !lastState?.changed ? "搜尋結果畫面未更新" : "網站尚未完成搜尋";
-  throw new Error(`「${keyword}」查詢逾時：${reason}。請在查詢頁確認後再繼續。`);
-  } finally {
-    capture.close();
-  }
 }
 
 async function scan(resumeState = null) {
@@ -376,7 +228,6 @@ async function scan(resumeState = null) {
     activeProgress = progress;
     if (generation !== scanGeneration) return;
     const { keywords, wasCapped, hotKeywordCount, listings } = progress;
-    const history = marketStore.historicalReferences();
     if (!keywords.length) {
       marketStore.finishRun(progress.runId, "PARTIAL", { paginationStatus: "PAGINATION_UNVERIFIED" });
       activeProgress = null;
@@ -389,24 +240,49 @@ async function scan(resumeState = null) {
       if (generation !== scanGeneration) return;
       if (index > 0 || resumeState) await wait(keywordDelayMs);
       if (generation !== scanGeneration) return;
-      const page = await runOneKeyword(keywords[index], generation,
-        listings.flatMap(toObservation), history);
+      const page = await scanKeywordPages(shopWindow.webContents, keywords[index], {
+        isActive: () => generation === scanGeneration,
+        runId: progress.runId
+      });
       if (generation !== scanGeneration) return;
-      listings.push(...page.rows);
+      listings.push(...page.items);
       progress.pageStatuses.push(page.status);
-      if (progress.catalogDue?.includes(keywords[index])) marketStore.markKeyword(keywords[index], true);
+      if (progress.catalogDue?.includes(keywords[index])) {
+        marketStore.markKeyword(keywords[index], page.status === "COMPLETE");
+      }
       progress.nextIndex = index + 1;
       saveCheckpoint(progress);
     }
 
-    const observations = listings.flatMap(toObservation);
-    const analyses = analyze(observations, history);
-    const freshCandidates = marketStore.saveObservations(progress.runId, observations, analyses,
-      { maxAlertRatio: thresholdRatio }).map((item) => ({
+    const completed = new Set(keywords.filter((_, index) =>
+      progress.pageStatuses[index] === "COMPLETE"));
+    const observations = listings.flatMap(toObservation)
+      .filter((item) => completed.has(item.keyword) && item.serverId === SERVER_ID);
+    const analyses = analyze(observations, marketStore.activeReferences());
+    const candidates = marketStore.unseenCandidates(analyses, thresholdRatio);
+    for (const keyword of new Set(candidates.map((item) => item.keyword))) {
+      if (generation !== scanGeneration) return;
+      await wait(keywordDelayMs);
+      const result = await scanKeywordPages(shopWindow.webContents, keyword, {
+        isActive: () => generation === scanGeneration, runId: progress.runId,
+        targets: candidates.filter((item) => item.keyword === keyword)
+      });
+      if (result.status !== "COMPLETE") {
+        for (const item of candidates.filter((entry) => entry.keyword === keyword)) {
+          item._confirmed = false;
+          item.location = null;
+        }
+      }
+    }
+    const confirmed = analyses.filter((item) =>
+      !candidates.includes(item) || item._confirmed === true);
+    const freshCandidates = marketStore.saveObservations(progress.runId, observations, confirmed,
+      { maxAlertRatio: thresholdRatio, scannedKeywords: [...completed] }).map((item) => ({
         ...item, navigation: navigationCommand(item.location)
       }));
-    marketStore.finishRun(progress.runId, "PARTIAL", {
-      attempted: keywords.length, succeeded: keywords.length, listings: observations.length,
+    marketStore.finishRun(progress.runId,
+      completed.size === keywords.length ? "COMPLETE" : "PARTIAL", {
+      attempted: keywords.length, succeeded: completed.size, listings: observations.length,
       paginationStatus: progress.pageStatuses.every((status) => status === "COMPLETE")
         ? "COMPLETE" : "PAGINATION_UNVERIFIED"
     });

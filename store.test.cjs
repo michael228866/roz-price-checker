@@ -75,18 +75,18 @@ test("alert location is a per-event snapshot and never borrows a previous positi
     assert.equal(save({ mapName: "prontera", x: 162, y: 92,
       source: "shop_detail_response", confidence: "MATCHED_SHOP_DETAIL" }).length, 1);
     assert.equal(save({ mapName: "prontera", x: 120, y: 80,
-      source: "shop_detail_response", confidence: "MATCHED_SHOP_DETAIL" }).length, 1);
+      source: "shop_detail_response", confidence: "MATCHED_SHOP_DETAIL" }).length, 0);
     assert.equal(save({ mapName: "prontera", x: 1, y: 1,
-      source: "unconfirmed", confidence: "LOW" }).length, 1);
+      source: "unconfirmed", confidence: "LOW" }).length, 0);
     const alerts = store.pendingAlerts();
     assert.deepEqual(alerts.map((alert) => [alert.mapName, alert.x, alert.y]),
-      [["prontera", 162, 92], ["prontera", 120, 80], [null, null, null]]);
+      [["prontera", 162, 92]]);
     assert.equal(store.db.prepare("SELECT location_map FROM listings LIMIT 1").get().location_map, null);
   } finally {
     store.close();
   }
   const reopened = new MarketStore(filename);
-  try { assert.equal(reopened.pendingAlerts().length, 3); }
+  try { assert.equal(reopened.pendingAlerts().length, 1); }
   finally {
     reopened.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -117,6 +117,57 @@ test("legacy SQLite rows survive the additive location migration", () => {
     assert.equal(store.status().listings, 1);
     assert.equal(store.pendingAlerts()[0].mapName, null);
     assert.equal(store.db.prepare("SELECT key FROM price_alerts").get().key, "alert");
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("coordinates do not create a second event for an unchanged price", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-event-"));
+  const store = new MarketStore(path.join(directory, "market.sqlite"));
+  try {
+    const base = { serverId: 529, shop: "Shop", ssi: "one", itemName: "Sword",
+      specification: "full", specComplete: true, storeType: "販售",
+      price: 100, quantity: 1, referencePrice: 1000, sampleCount: 3,
+      confidence: "MEDIUM", anomalyType: "POSSIBLE_MISSING_ZERO", ratio: 0.1 };
+    assert.equal(store.saveObservations(store.startRun(), [base], [base]).length, 1);
+    const located = { ...base, location: { mapName: "prontera", x: 1, y: 2,
+      source: "shop_detail_response", confidence: "MATCHED_SHOP_DETAIL" } };
+    assert.equal(store.saveObservations(store.startRun(), [located], [located]).length, 0);
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects observations from another server", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-server-"));
+  const store = new MarketStore(path.join(directory, "market.sqlite"));
+  try {
+    const item = { serverId: 999, shop: "Shop", itemName: "Sword",
+      specification: "full", specComplete: true, storeType: "販售",
+      price: 100, quantity: 1 };
+    assert.throws(() => store.saveObservations(store.startRun(), [item], []), /529/);
+    assert.equal(store.status().listings, 0);
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("old asking snapshots are archival data, not active market references", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-active-"));
+  const store = new MarketStore(path.join(directory, "market.sqlite"));
+  try {
+    const item = { serverId: 529, shop: "Shop", ssi: "one", itemName: "Sword",
+      specification: "full", specComplete: true, storeType: "販售",
+      price: 1000, quantity: 1 };
+    const run = store.startRun();
+    store.saveObservations(run, [item], []);
+    assert.equal(store.historicalReferences()[0].marketKind, "ASK_HISTORY");
+    assert.equal(store.activeReferences(new Date(Date.now() + 16 * 60000)).length, 0);
+    assert.equal(store.transactionReferences().length, 0);
   } finally {
     store.close();
     fs.rmSync(directory, { recursive: true, force: true });

@@ -29,3 +29,34 @@ test("unknown next-page control cannot be called complete", async () => {
   const result = await collectPages(async () => ({ items: [], reportedCount: 0, hasNext: null }));
   assert.equal(result.status, "PAGINATION_UNVERIFIED");
 });
+
+test("collects the verified second page through the supplied UI fetcher", async () => {
+  const visited = [];
+  const result = await collectPages(async (page) => {
+    visited.push(page);
+    return { items: [{ shop: `shop-${page}`, ssi: `id-${page}`,
+      specification: "spec", price: page, quantity: 1 }],
+    reportedCount: 2, hasNext: page === 1, countVerified: true };
+  });
+  assert.deepEqual(visited, [1, 2]);
+  assert.equal(result.items.length, 2);
+  assert.equal(result.status, "COMPLETE");
+});
+
+test("different SSI listings with identical shop, specification and price remain distinct", async () => {
+  const result = await collectPages((page) => ({ items: [{ shop: "A", ssi: `ssi-${page}`,
+    specification: "same", price: 100, quantity: 1 }], reportedCount: 2,
+  hasNext: page === 1, countVerified: true }));
+  assert.equal(result.items.length, 2);
+  assert.equal(result.status, "COMPLETE");
+});
+
+test("changing reported totals during paging marks the scan partial", async () => {
+  const result = await collectPages(async (page) => ({
+    items: [{ serverId: 529, shop: `Shop${page}`, ssi: `${page}`,
+      itemName: "Stone", specification: "spec", price: 100, quantity: 1 }],
+    reportedCount: page === 1 ? 2 : 3, hasNext: page === 1,
+    countVerified: true
+  }));
+  assert.equal(result.status, "PARTIAL");
+});

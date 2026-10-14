@@ -53,3 +53,16 @@ test("price changes create a new version of the same listing identity", () => {
   assert.notEqual(listingVersion(first), listingVersion(changed));
   assert.notEqual(listingIdentity(first), listingIdentity(item("A", 10000, 1)));
 });
+
+test("same-name shops with different current SSI remain separate listings", () => {
+  const first = { ...item("Same Shop", 100), ssi: "listing-1" };
+  const second = { ...item("Same Shop", 100), ssi: "listing-2" };
+  assert.notEqual(listingIdentity(first), listingIdentity(second));
+});
+
+test("historical asking prices are not treated as active comparables", () => {
+  const cheap = item("A", 100);
+  const history = ["B", "C", "D"].map((shop) =>
+    ({ ...item(shop, 1000), marketKind: "ASK_HISTORY" }));
+  assert.equal(analyze([cheap], history).length, 0);
+});

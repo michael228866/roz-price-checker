@@ -1,4 +1,4 @@
-const { parseResponse } = require("./market.cjs");
+const { SERVER_ID, parseResponse } = require("./market.cjs");
 const { parseShopLocation } = require("./shop_location.cjs");
 
 function sameListing(row, item) {
@@ -8,7 +8,7 @@ function sameListing(row, item) {
     row.quantity === item.quantity;
 }
 
-async function captureShopResponse(webContents, keyword) {
+async function captureShopResponse(webContents, keyword, rowStart = 1) {
   const debuggerApi = webContents.debugger;
   if (!debuggerApi || debuggerApi.isAttached()) return null;
   const requests = new Map();
@@ -37,7 +37,7 @@ async function captureShopResponse(webContents, keyword) {
       if (closed || status === "ambiguous") return;
       const body = result.base64Encoded
         ? Buffer.from(result.body, "base64").toString("utf8") : result.body;
-      response = parseResponse(JSON.parse(body), { keyword });
+      response = parseResponse(JSON.parse(body), { keyword, serverId: SERVER_ID });
       status = response.errors.length ? "invalid" : "ready";
     } catch { status = "invalid"; }
   };
@@ -64,10 +64,14 @@ async function captureShopResponse(webContents, keyword) {
         }
       }
       if (closed) return;
-      let requestedKeyword;
-      try { requestedKeyword = JSON.parse(body).txb_KeyWord; }
+      let input;
+      try { input = JSON.parse(body); }
       catch { requests.delete(params.requestId); return; }
-      if (requestedKeyword !== keyword) { requests.delete(params.requestId); return; }
+      if (input.txb_KeyWord !== keyword || Number(input.div_svr) !== SERVER_ID ||
+          Number(input.row_start) !== rowStart) {
+        requests.delete(params.requestId);
+        return;
+      }
       request.matched = true;
       count += 1;
       if (count > 1) status = "ambiguous";
@@ -142,7 +146,7 @@ function enrichVisibleRows(rows, parsed) {
 }
 
 async function captureShopLocation(webContents, listing, clickShop) {
-  if (!listing.ssi || !Number.isSafeInteger(listing.serverId)) return null;
+  if (!listing.ssi || listing.serverId !== SERVER_ID) return null;
   const debuggerApi = webContents.debugger;
   if (!debuggerApi || debuggerApi.isAttached()) return null;
   let requestId = null;

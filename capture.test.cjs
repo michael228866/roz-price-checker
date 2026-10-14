@@ -22,10 +22,12 @@ test("matches only the armed search request and its own response", async () => {
       itemCNT: 1, storetype: 0 }], dt2: [{ count: 1 }] }) } : {};
   const capture = await captureShopResponse({ debugger: debuggerApi }, "Wanted");
   capture.arm();
-  const request = (requestId, keyword) => debuggerApi.emit("message", null, "Network.requestWillBeSent", {
+  const request = (requestId, keyword, serverId = "529") => debuggerApi.emit("message", null, "Network.requestWillBeSent", {
     requestId, request: { method: "POST", url: "https://event.gnjoy.com.tw/forAjax_shopDeal",
-      postData: JSON.stringify({ txb_KeyWord: keyword }) }
+      postData: JSON.stringify({ txb_KeyWord: keyword, div_svr: serverId, row_start: "1" }) }
   });
+  request("other-server", "Wanted", "999");
+  assert.equal(capture.peek().matchedRequests, 0);
   request("wrong", "Other");
   debuggerApi.emit("message", null, "Network.responseReceived", {
     requestId: "wrong", response: { status: 200 }
@@ -57,7 +59,8 @@ test("matches search when CDP omits postData from the first event", async () => 
   debuggerApi.sendCommand = async (command) => {
     if (command === "Network.getRequestPostData") {
       await new Promise((resolve) => { releaseBody = resolve; });
-      return { postData: JSON.stringify({ txb_KeyWord: "Wanted" }) };
+      return { postData: JSON.stringify({ txb_KeyWord: "Wanted",
+        div_svr: "529", row_start: "1" }) };
     }
     if (command === "Network.getResponseBody") {
       return { body: JSON.stringify({ dt: [{ storeName: "A", itemName: "Wanted",
@@ -109,6 +112,8 @@ test("shop details bind coordinates to the clicked SSI and exact listing", async
   };
   const first = await captureShopLocation({ debugger: debuggerApi }, listing, click);
   assert.deepEqual(first && [first.mapName, first.x, first.y], ["prontera", 162, 92]);
+  assert.equal(await captureShopLocation({ debugger: debuggerApi },
+    { ...listing, serverId: 999 }, click), null);
   detail = { ...detail, SSI2: "store-2", xPos: 99 };
   assert.equal(await captureShopLocation({ debugger: debuggerApi }, listing, click), null);
   detail = { ...detail, SSI2: "store-1", xPos: 120, yPos: 80 };

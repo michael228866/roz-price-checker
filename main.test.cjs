@@ -22,7 +22,7 @@ test("resumes after human verification without losing completed keywords", async
           }
           if (script.includes("const message =")) {
             return {
-              changed: true,
+              changed: queries !== 3,
               loading: false,
               noResults: false,
               output: [{ shop: `shop${queries}`, itemName: "Example", slots: "1", price: 100, quantity: 1, storeType: "販售" }],
@@ -51,6 +51,8 @@ test("resumes after human verification without losing completed keywords", async
     catalog() { return []; }
     dueCatalog() { return []; }
     historicalReferences() { return []; }
+    activeReferences() { return []; }
+    unseenCandidates() { return []; }
     markKeyword() {}
     startRun() { return 1; }
     finishRun() {}
@@ -62,11 +64,13 @@ test("resumes after human verification without losing completed keywords", async
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8"), {
     require: (name) => name === "electron" ? electron
       : name === "./store.cjs" ? { MarketStore: FakeStore }
-      : name === "./capture.cjs" ? {
-        captureShopResponse: async () => ({ arm() {}, peek: () => ({ status: "ready", response: { items: [], errors: [], reportedCount: null } }), close() {} }),
-        enrichVisibleRows: (rows) => rows,
-        matchesVisible: () => true
-      } : require(name),
+      : name === "./shop_scanner.cjs" ? { scanKeywordPages: async (_webContents, keyword) => {
+        queries += 1;
+        if (queries === 2) throw new Error("請完成圖形驗證");
+        return { status: "COMPLETE", items: [{ keyword, shop: `shop${queries}`,
+          itemName: "Example", slots: "1", price: 100, quantity: 1,
+          storeType: "販售", serverId: 529 }] };
+      } } : require(name),
     __dirname,
     setTimeout: (callback) => callback(),
     setInterval: () => 1,
@@ -75,7 +79,7 @@ test("resumes after human verification without losing completed keywords", async
   await Promise.resolve();
 
   await handlers.get("start-scanning")(null, { keywords: ["first", "second"], ratio: 0.15 });
-  assert.equal(queries, 2);
+  assert.equal(queries, 2, JSON.stringify(events));
   assert.ok(events.some(({ name, value }) => name === "scan-state" && value === "paused"));
 
   await handlers.get("resume-scanning")();
