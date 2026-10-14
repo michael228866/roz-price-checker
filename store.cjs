@@ -319,7 +319,10 @@ class MarketStore {
       coverage: this.db.prepare(`SELECT COUNT(*) AS known,
         SUM(CASE WHEN last_success_at IS NOT NULL THEN 1 ELSE 0 END) AS scanned
         FROM search_keywords`).get(),
-      lastRun: this.db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() ?? null
+      lastRun: this.db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() ?? null,
+      lastCompletedRun: this.db.prepare(`SELECT finished_at, status, listings_parsed
+        FROM scan_runs WHERE finished_at IS NOT NULL AND status IN ('COMPLETE', 'PARTIAL')
+        ORDER BY id DESC LIMIT 1`).get() ?? null
     };
   }
 

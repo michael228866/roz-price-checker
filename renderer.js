@@ -29,6 +29,10 @@ function showMarketStatus(status) {
     `已知商品 ${status.catalog} 筆 · 已存掛單 ${status.listings} 筆 · 待送通知 ${status.pendingAlerts} 筆 · 最近掃描 ${status.lastRun?.status || "無"}`;
   if (coverage) document.querySelector("#market-status").textContent +=
     `・索引覆蓋 ${coverage.scanned ?? 0}/${coverage.known ?? 0}`;
+  const run = status.lastCompletedRun;
+  lastScan.textContent = run?.finished_at
+    ? `上次掃描：${new Date(run.finished_at).toLocaleString("zh-TW")}（${run.status === "COMPLETE" ? "完成" : "部分完成"}，${run.listings_parsed} 筆掛單）`
+    : "上次掃描：尚無完成紀錄";
 }
 window.shopAlert.marketStatus().then(showMarketStatus).catch((error) => setStatus(error.message, "error"));
 window.shopAlert.onMarketStatus(showMarketStatus);
@@ -93,8 +97,7 @@ window.shopAlert.onState((state) => {
   resumeButton.hidden = state !== "paused";
   stopButton.disabled = state === "stopped";
 });
-window.shopAlert.onResults(({ checkedAt, listingCount, candidates }) => {
-  lastScan.textContent = `最後掃描：${new Date(checkedAt).toLocaleString()}（${listingCount} 筆掛單）`;
+window.shopAlert.onResults(({ candidates }) => {
   if (!candidates.length) return;
   resultsBox.classList.remove("empty");
   const cards = candidates.map((candidate) => {

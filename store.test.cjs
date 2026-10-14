@@ -173,3 +173,23 @@ test("old asking snapshots are archival data, not active market references", () 
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("last finished scan remains available while another scan starts and after reopening", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-scan-time-"));
+  const filename = path.join(directory, "market.sqlite");
+  const store = new MarketStore(filename);
+  try {
+    const first = store.startRun();
+    store.finishRun(first, "COMPLETE", { listings: 7 });
+    const finishedAt = store.status().lastCompletedRun.finished_at;
+    store.startRun();
+    assert.equal(store.status().lastCompletedRun.finished_at, finishedAt);
+    assert.equal(store.status().lastCompletedRun.listings_parsed, 7);
+    store.close();
+    const reopened = new MarketStore(filename);
+    try { assert.equal(reopened.status().lastCompletedRun.finished_at, finishedAt); }
+    finally { reopened.close(); }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
