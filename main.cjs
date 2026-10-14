@@ -332,16 +332,20 @@ async function runOneKeyword(keyword, generation, previous = [], history = []) {
     }
   }
   const captured = capture.peek();
+  const visibleRows = lastState?.output ?? [];
+  const responseRows = captured.response?.items ?? [];
+  const matchingSsi = visibleRows.filter((row) => row.ssi &&
+    responseRows.some((item) => item.ssi === row.ssi)).length;
   logEvent("SEARCH_TIMEOUT", { searchRequests: captured.searchRequests,
     matchedRequests: captured.matchedRequests,
     unreadableRequests: captured.unreadableRequests,
     captureStatus: captured.status, domChanged: lastState?.changed ?? false,
-    visibleRows: lastState?.output?.length ?? 0 });
+    visibleRows: visibleRows.length, responseRows: responseRows.length, matchingSsi });
   const reason = !captured.searchRequests ? "頁面未送出搜尋請求，請檢查登入與圖形驗證" :
     captured.unreadableRequests ? "無法讀取搜尋請求以核對關鍵字" :
     !captured.matchedRequests ? "搜尋請求的關鍵字與本輪不符" :
-    captured.status === "ready" && !matchesVisible(lastState?.output ?? [], captured.response)
-      ? "搜尋回應與畫面資料不一致" :
+    captured.status === "ready" && !matchesVisible(visibleRows, captured.response)
+      ? `搜尋回應與畫面資料不一致（回應 ${responseRows.length} 筆、畫面 ${visibleRows.length} 筆、商店識別相符 ${matchingSsi} 筆）` :
     !lastState?.changed ? "搜尋結果畫面未更新" : "網站尚未完成搜尋";
   throw new Error(`「${keyword}」查詢逾時：${reason}。請在查詢頁確認後再繼續。`);
   } finally {

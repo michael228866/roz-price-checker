@@ -12,6 +12,19 @@ function fingerprint(item) {
   return crypto.createHash("sha256").update(JSON.stringify(specification)).digest("hex");
 }
 
+function displayName(row) {
+  const grade = { 1: "D階", 2: "C階", 3: "B階", 4: "A階" }[row.ItemGradeLevel];
+  const parts = [];
+  if (row.itemRefining > 0) parts.push(`+${row.itemRefining}`);
+  if (grade) parts.push(grade);
+  parts.push(row.itemName);
+  for (const field of ["slot_1", "slot_2", "slot_3", "slot_4",
+    "RandomOpt1", "RandomOpt2", "RandomOpt3", "RandomOpt4", "RandomOpt5"]) {
+    if (row[field]) parts.push(row[field]);
+  }
+  return parts.join(" ").trim();
+}
+
 function parseResponse(payload, { keyword = "", serverId = 529 } = {}) {
   if (!payload || !Array.isArray(payload.dt)) throw new Error("查詢回應缺少 dt 掛單陣列");
   const items = [];
@@ -26,7 +39,8 @@ function parseResponse(payload, { keyword = "", serverId = 529 } = {}) {
       continue;
     }
     const item = {
-      keyword, serverId, shop: String(row.storeName ?? ""), itemName: row.itemName,
+      keyword, serverId, shop: String(row.storeName ?? "").trim(),
+      itemName: row.itemName, displayName: displayName(row),
       price, quantity, storeType: row.storetype, specification: fingerprint(row),
       ssi: row.SSI2 == null ? null : String(row.SSI2),
       location: parseShopLocation(row, "search_response"),

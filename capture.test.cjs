@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { captureShopResponse, captureShopLocation, enrichVisibleRows, matchesVisible } = require("./capture.cjs");
+const { parseResponse } = require("./market.cjs");
 
 test("enriches only unambiguous normal UI response matches", () => {
   const row = { shop: "A", itemName: "Example", price: 100, quantity: 1, storeType: "販售" };
@@ -122,4 +123,17 @@ test("same-name shops match their own SSI instead of borrowing coordinates", () 
     { ...rows[1], specification: "spec2", specComplete: true }], errors: [] };
   assert.equal(matchesVisible(rows, parsed), true);
   assert.deepEqual(enrichVisibleRows(rows, parsed).map((row) => row.specification), ["spec1", "spec2"]);
+});
+
+test("official decorated item names and trimmed shop names match the visible table", () => {
+  const parsed = parseResponse({ dt: [{ SSI2: "42", storeName: "  Shop  ",
+    itemName: "Sword", itemRefining: 7, ItemGradeLevel: 2,
+    slot_1: "Card", RandomOpt1: "STR+1", itemPrice: 100,
+    itemCNT: 1, storetype: 0 }] });
+  const rows = [{ ssi: "42", shop: "Shop", itemName: "+7 C階 Sword Card STR+1",
+    price: 100, quantity: 1 }];
+  assert.equal(matchesVisible(rows, parsed), true);
+  assert.equal(enrichVisibleRows(rows, parsed)[0].specification,
+    parsed.items[0].specification);
+  assert.equal(matchesVisible([{ ...rows[0], ssi: "43" }], parsed), false);
 });

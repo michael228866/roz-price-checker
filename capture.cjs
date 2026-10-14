@@ -2,10 +2,9 @@ const { parseResponse } = require("./market.cjs");
 const { parseShopLocation } = require("./shop_location.cjs");
 
 function sameListing(row, item) {
-  const identity = row.ssi && item.ssi
-    ? row.ssi === item.ssi && row.itemName.includes(item.itemName)
-    : row.itemName === item.itemName;
-  return identity && row.shop === item.shop && row.price === item.price &&
+  const identity = (row.ssi ?? null) === (item.ssi ?? null);
+  return identity && row.itemName === (item.displayName ?? item.itemName) &&
+    row.shop === item.shop && row.price === item.price &&
     row.quantity === item.quantity;
 }
 
@@ -114,11 +113,13 @@ function matchesVisible(rows, parsed) {
   if (!parsed || parsed.errors.length || rows.length !== parsed.items.length) return false;
   const counts = new Map();
   for (const item of parsed.items) {
-    const key = JSON.stringify([item.shop, item.ssi ?? item.itemName, item.price, item.quantity]);
+    const key = JSON.stringify([item.shop, item.displayName ?? item.itemName,
+      item.ssi, item.price, item.quantity]);
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   for (const row of rows) {
-    const key = JSON.stringify([row.shop, row.ssi ?? row.itemName, row.price, row.quantity]);
+    const key = JSON.stringify([row.shop, row.itemName, row.ssi,
+      row.price, row.quantity]);
     if (!counts.get(key)) return false;
     counts.set(key, counts.get(key) - 1);
   }
