@@ -1,4 +1,4 @@
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const path = require("node:path");
 
 function existingInstanceCount(electronExe, run = spawnSync) {
@@ -17,15 +17,20 @@ function existingInstanceCount(electronExe, run = spawnSync) {
   return count;
 }
 
-function launch(run = spawnSync) {
+function launch(run = spawnSync, start = spawn) {
   const electronExe = require("electron");
   if (existingInstanceCount(electronExe, run) > 0) {
     process.stdout.write("ROZ 查價器已在執行，請切換至已開啟的視窗。\n");
     return 0;
   }
-  const child = run(electronExe, ["."], { cwd: path.resolve(__dirname), stdio: "inherit" });
-  if (child.error) throw child.error;
-  return child.status ?? 1;
+  const child = start(electronExe, ["."], {
+    cwd: path.resolve(__dirname), detached: true, stdio: "ignore", windowsHide: true
+  });
+  if (!child.pid) throw new Error("Electron 啟動失敗。");
+  child.once("error", (error) => process.stderr.write(`Electron 啟動失敗：${error.message}\n`));
+  child.unref();
+  process.stdout.write("ROZ 查價器已啟動；BAT 視窗可直接關閉。\n");
+  return 0;
 }
 
 if (require.main === module) {

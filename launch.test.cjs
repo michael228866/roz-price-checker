@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { existingInstanceCount } = require("./launch.cjs");
+const { existingInstanceCount, launch } = require("./launch.cjs");
 
 test("launcher detects another main Electron process without starting a second one", () => {
   if (process.platform !== "win32") return;
@@ -16,4 +16,19 @@ test("launcher refuses to proceed when process inspection fails", () => {
   assert.throws(() => existingInstanceCount("C:\\app\\electron.exe", () => ({
     status: 1, stdout: ""
   })), /無法確認程式是否已在執行/);
+});
+
+test("launcher detaches Electron from the BAT process", () => {
+  let unref = false;
+  let options;
+  const count = () => ({ status: 0, stdout: "0" });
+  const start = (_exe, args, value) => {
+    assert.deepEqual(args, ["."]);
+    options = value;
+    return { pid: 123, once() {}, unref() { unref = true; } };
+  };
+  assert.equal(launch(count, start), 0);
+  assert.equal(options.detached, true);
+  assert.equal(options.stdio, "ignore");
+  assert.equal(unref, true);
 });
