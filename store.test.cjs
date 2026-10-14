@@ -193,3 +193,22 @@ test("last finished scan remains available while another scan starts and after r
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("last search time persists even when the scan stops during verification", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-last-search-"));
+  const filename = path.join(directory, "market.sqlite");
+  const store = new MarketStore(filename);
+  try {
+    const run = store.startRun();
+    store.markSearchAttempt(run, "物理魔晶石");
+    store.finishRun(run, "CHALLENGE_REQUIRED");
+    assert.equal(store.status().lastSearch.keyword, "物理魔晶石");
+    assert.ok(Number.isFinite(Date.parse(store.status().lastSearch.searchedAt)));
+    store.close();
+    const reopened = new MarketStore(filename);
+    try { assert.equal(reopened.status().lastSearch.keyword, "物理魔晶石"); }
+    finally { reopened.close(); }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

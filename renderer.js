@@ -9,6 +9,7 @@ const stopButton = document.querySelector("#stop");
 const statusBox = document.querySelector("#status");
 const resultsBox = document.querySelector("#results");
 const lastScan = document.querySelector("#last-scan");
+const lastSearch = document.querySelector("#last-search");
 const alertDialog = document.querySelector("#alert-dialog");
 const alertItems = document.querySelector("#alert-items");
 
@@ -33,6 +34,10 @@ function showMarketStatus(status) {
   lastScan.textContent = run?.finished_at
     ? `上次掃描：${new Date(run.finished_at).toLocaleString("zh-TW")}（${run.status === "COMPLETE" ? "完成" : "部分完成"}，${run.listings_parsed} 筆掛單）`
     : "上次掃描：尚無完成紀錄";
+  const search = status.lastSearch;
+  lastSearch.textContent = search?.searchedAt
+    ? `最後一次搜尋：${new Date(search.searchedAt).toLocaleString("zh-TW")}（${search.keyword}）`
+    : "最後一次搜尋：尚無紀錄";
 }
 window.shopAlert.marketStatus().then(showMarketStatus).catch((error) => setStatus(error.message, "error"));
 window.shopAlert.onMarketStatus(showMarketStatus);

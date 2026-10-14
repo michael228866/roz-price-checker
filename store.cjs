@@ -82,6 +82,14 @@ class MarketStore {
     if (!columns.includes("sample_count")) {
       this.db.exec("ALTER TABLE price_alerts ADD COLUMN sample_count INTEGER");
     }
+    const runColumns = new Set(this.db.prepare("PRAGMA table_info(scan_runs)").all()
+      .map((column) => column.name));
+    if (!runColumns.has("last_search_at")) {
+      this.db.exec("ALTER TABLE scan_runs ADD COLUMN last_search_at TEXT");
+    }
+    if (!runColumns.has("last_keyword")) {
+      this.db.exec("ALTER TABLE scan_runs ADD COLUMN last_keyword TEXT");
+    }
     for (const table of ["listings", "price_alerts"]) {
       const existing = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all()
         .map((column) => column.name));
@@ -188,6 +196,11 @@ class MarketStore {
   startRun() {
     return Number(this.db.prepare("INSERT INTO scan_runs (started_at, status) VALUES (?, 'RUNNING')")
       .run(new Date().toISOString()).lastInsertRowid);
+  }
+
+  markSearchAttempt(runId, keyword) {
+    this.db.prepare("UPDATE scan_runs SET last_search_at=?, last_keyword=? WHERE id=?")
+      .run(new Date().toISOString(), keyword, runId);
   }
 
   finishRun(id, status, metrics = {}, error = null) {
@@ -320,6 +333,8 @@ class MarketStore {
         SUM(CASE WHEN last_success_at IS NOT NULL THEN 1 ELSE 0 END) AS scanned
         FROM search_keywords`).get(),
       lastRun: this.db.prepare("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1").get() ?? null,
+      lastSearch: this.db.prepare(`SELECT last_search_at AS searchedAt, last_keyword AS keyword
+        FROM scan_runs WHERE last_search_at IS NOT NULL ORDER BY id DESC LIMIT 1`).get() ?? null,
       lastCompletedRun: this.db.prepare(`SELECT finished_at, status, listings_parsed
         FROM scan_runs WHERE finished_at IS NOT NULL AND status IN ('COMPLETE', 'PARTIAL')
         ORDER BY id DESC LIMIT 1`).get() ?? null

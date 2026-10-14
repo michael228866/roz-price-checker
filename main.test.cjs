@@ -55,6 +55,7 @@ test("resumes after human verification without losing completed keywords", async
     activeReferences() { return []; }
     unseenCandidates() { return []; }
     markKeyword() {}
+    markSearchAttempt() {}
     startRun() { return 1; }
     finishRun() {}
     saveObservations() { return []; }

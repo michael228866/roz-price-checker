@@ -244,6 +244,8 @@ async function scan(resumeState = null) {
       if (generation !== scanGeneration) return;
       if (index > 0 || resumeState) await wait(keywordDelayMs);
       if (generation !== scanGeneration) return;
+      marketStore.markSearchAttempt(progress.runId, keywords[index]);
+      appWindow?.webContents.send("market-status", marketStore.status());
       const page = await scanKeywordPages(shopWindow.webContents, keywords[index], {
         isActive: () => generation === scanGeneration,
         runId: progress.runId
@@ -267,6 +269,8 @@ async function scan(resumeState = null) {
     for (const keyword of new Set(candidates.map((item) => item.keyword))) {
       if (generation !== scanGeneration) return;
       await wait(keywordDelayMs);
+      marketStore.markSearchAttempt(progress.runId, keyword);
+      appWindow?.webContents.send("market-status", marketStore.status());
       const result = await scanKeywordPages(shopWindow.webContents, keyword, {
         isActive: () => generation === scanGeneration, runId: progress.runId,
         targets: candidates.filter((item) => item.keyword === keyword)
@@ -338,6 +342,7 @@ async function scan(resumeState = null) {
         attempted: progress.nextIndex + 1, succeeded: progress.nextIndex,
         listings: progress.listings.length
       });
+      appWindow?.webContents.send("market-status", marketStore.status());
       logEvent(status, { runId: progress.runId });
       appWindow?.webContents.send("scan-state", "paused");
       shopWindow?.focus();
@@ -349,6 +354,7 @@ async function scan(resumeState = null) {
       attempted: progress.nextIndex + 1, succeeded: progress.nextIndex,
       listings: progress.listings.length
     }, "SCAN_FAILED");
+    appWindow?.webContents.send("market-status", marketStore.status());
     activeProgress = null;
     stopScanning();
     logEvent(status, { runId: progress?.runId ?? null });
