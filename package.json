@@ -5,7 +5,7 @@
   "description": "ROZ露天商店行情與低價候選提醒工具",
   "main": "main.cjs",
   "scripts": {
-    "start": "electron .",
+    "start": "node launch.cjs",
     "test": "node --test"
   },
   "devDependencies": {
