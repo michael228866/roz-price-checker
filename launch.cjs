@@ -1,4 +1,5 @@
 const { spawn, spawnSync } = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 
 function existingInstanceCount(electronExe, run = spawnSync) {
@@ -23,9 +24,19 @@ function launch(run = spawnSync, start = spawn) {
     process.stdout.write("ROZ 查價器已在執行，請切換至已開啟的視窗。\n");
     return 0;
   }
-  const child = start(electronExe, ["."], {
-    cwd: path.resolve(__dirname), detached: true, stdio: "ignore", windowsHide: true
-  });
+  const environment = { ...process.env };
+  delete environment.ELECTRON_RUN_AS_NODE;
+  const logPath = path.join(process.env.APPDATA || __dirname,
+    "roz-shop-price-alert", "startup.log");
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  const log = fs.openSync(logPath, "a");
+  let child;
+  try {
+    child = start(electronExe, ["."], {
+      cwd: path.resolve(__dirname), detached: true,
+      stdio: ["ignore", log, log], windowsHide: true, env: environment
+    });
+  } finally { fs.closeSync(log); }
   if (!child.pid) throw new Error("Electron 啟動失敗。");
   child.once("error", (error) => process.stderr.write(`Electron 啟動失敗：${error.message}\n`));
   child.unref();

@@ -29,6 +29,8 @@ test("launcher detaches Electron from the BAT process", () => {
   };
   assert.equal(launch(count, start), 0);
   assert.equal(options.detached, true);
-  assert.equal(options.stdio, "ignore");
+  assert.equal(options.stdio[0], "ignore");
+  assert.equal(typeof options.stdio[1], "number");
+  assert.equal(options.env.ELECTRON_RUN_AS_NODE, undefined);
   assert.equal(unref, true);
 });
