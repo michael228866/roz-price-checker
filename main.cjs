@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, Notification, safeStorage, clipboard } = require("electron");
+const { app, BrowserWindow, ipcMain, Notification, safeStorage, clipboard,
+  dialog } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { SERVER_ID, fromVisibleRows, analyze } = require("./market.cjs");
@@ -31,6 +32,12 @@ let deliveryTimer;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) app.quit();
+
+function logStartup(stage, error = null) {
+  const message = `${new Date().toISOString()} ${stage}${error ? ` ${error.stack || error}` : ""}\n`;
+  try { fs.appendFileSync(path.join(app.getPath("userData"), "startup.log"), message); }
+  catch { process.stderr.write(message); }
+}
 
 function logEvent(code, details = {}) {
   if (!marketStore) return;
@@ -107,6 +114,7 @@ function sendStatus(message, state = "info") {
 }
 
 function createAppWindow() {
+  logStartup("CREATE_WINDOW");
   appWindow = new BrowserWindow({
     width: 900,
     height: 720,
@@ -120,11 +128,18 @@ function createAppWindow() {
     }
   });
   appWindow.loadFile("index.html");
+  logStartup("LOAD_FILE_REQUESTED");
+  appWindow.webContents.on("did-fail-load", (_event, code, description) =>
+    logStartup("DID_FAIL_LOAD", `${code} ${description}`));
+  appWindow.webContents.on("render-process-gone", (_event, details) =>
+    logStartup("RENDER_PROCESS_GONE", details.reason));
   appWindow.once("ready-to-show", () => {
+    logStartup("READY_TO_SHOW");
     appWindow.show();
     appWindow.focus();
   });
   appWindow.webContents.once("did-finish-load", () => {
+    logStartup("DID_FINISH_LOAD");
     appWindow.webContents.send("market-status", marketStore.status());
     if (pausedScan) {
       appWindow.webContents.send("scan-state", "paused");
@@ -506,12 +521,18 @@ if (hasSingleInstanceLock) app.on("second-instance", () => {
 });
 
 if (hasSingleInstanceLock) app.whenReady().then(() => {
+  logStartup("APP_READY");
   marketStore = new MarketStore(path.join(app.getPath("userData"), "market.sqlite"));
+  logStartup("STORE_READY");
   discordWebhook = loadWebhook();
   pausedScan = loadCheckpoint();
   createAppWindow();
   deliveryTimer = setInterval(() => deliverPendingAlerts().catch(() =>
     logEvent("DELIVERY_LOOP_FAILED")), 60000);
+}).catch((error) => {
+  logStartup("STARTUP_FAILED", error);
+  dialog?.showErrorBox?.("ROZ 查價器啟動失敗", error.message);
+  app.quit();
 });
 if (hasSingleInstanceLock) app.on("window-all-closed", () => {
   stopScanning();

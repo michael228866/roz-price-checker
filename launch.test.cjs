@@ -18,6 +18,13 @@ test("launcher refuses to proceed when process inspection fails", () => {
   })), /無法確認程式是否已在執行/);
 });
 
+test("launcher reports a no-renderer process instead of claiming the UI is open", () => {
+  if (process.platform !== "win32") return;
+  assert.throws(() => existingInstanceCount("C:\\app\\electron.exe", () => ({
+    status: 0, stdout: "STALE:12345\r\n"
+  })), /PID 12345/);
+});
+
 test("launcher detaches Electron from the BAT process", () => {
   let unref = false;
   let options;

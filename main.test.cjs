@@ -13,7 +13,7 @@ test("resumes after human verification without losing completed keywords", async
     constructor() {
       this.webContents = {
         send: (name, value) => events.push({ name, value }),
-        once() {},
+        once() {}, on() {},
         executeJavaScript: async (script) => {
           if (script.includes("document.readyState")) return true;
           if (script.includes("return { started: true }")) {
@@ -125,4 +125,29 @@ test("checkpoint after the final keyword resumes the analysis phase", () => {
   vm.runInNewContext(source, context);
   try { assert.equal(context.readCheckpointForTest()?.nextIndex, 1); }
   finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("startup database failure is logged and exits instead of leaving an invisible process", async () => {
+  const directory = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "roz-startup-"));
+  let quits = 0;
+  let errorMessage = "";
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8"), {
+    require: (name) => name === "electron" ? {
+      app: { requestSingleInstanceLock: () => true,
+        whenReady: () => Promise.resolve(), on() {},
+        getPath: () => directory, quit: () => { quits += 1; } },
+      ipcMain: { handle() {} },
+      dialog: { showErrorBox: (_title, message) => { errorMessage = message; } }
+    } : name === "./store.cjs" ? { MarketStore: class {
+      constructor() { throw new Error("DATABASE_STARTUP_FAILED"); }
+    } } : require(name),
+    __dirname
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  try {
+    assert.equal(quits, 1);
+    assert.match(errorMessage, /DATABASE_STARTUP_FAILED/);
+    assert.match(fs.readFileSync(path.join(directory, "startup.log"), "utf8"),
+      /STARTUP_FAILED/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });

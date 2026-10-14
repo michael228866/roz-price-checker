@@ -15,7 +15,7 @@ async function runScenario({ first, second, analyses = [], checkpoint = null,
   const unavailable = [];
   let searches = 0;
   class BrowserWindow {
-    constructor() { this.webContents = { send() {}, once() {},
+    constructor() { this.webContents = { send() {}, once() {}, on() {},
       executeJavaScript: async () => true }; }
     loadFile() {} loadURL() {} once() {} on() {} show() {} focus() {}
     isDestroyed() { return false; }
