@@ -17,6 +17,9 @@ function fixture(count = 31) {
   const requested = [];
   const webContents = { executeJavaScript: async (script) => {
     if (script.includes("return { started: true }")) {
+      if (script.includes("const page = 2;")) {
+        assert.ok(script.includes("'javascript:goPage(' + page + ')'"));
+      }
       current = script.includes("const page = 2;") ? 1 : 0;
       return { started: true };
     }
@@ -72,6 +75,21 @@ test("mismatched SSI cannot inherit another shop's location", async () => {
   const target = { serverId: 529, keyword: "Stone", shop: "Shop0",
     itemName: "Stone", ssi: "OTHER", specification: "spec",
     price: 100, quantity: 1 };
+  let lookups = 0;
+  await scanKeywordPages(setup.webContents, "Stone", {
+    captureSearch: setup.captureSearch, wait: async () => {},
+    rowsMatch: () => true, enrichRows: (rows) => rows,
+    targets: [target], captureLocation: async () => { lookups += 1; return null; }
+  });
+  assert.equal(lookups, 0);
+  assert.equal(target._confirmed, undefined);
+});
+
+test("a sold listing is not confirmed when its price or quantity changed", async () => {
+  const setup = fixture(1);
+  const target = { serverId: 529, keyword: "Stone", shop: "Shop0",
+    itemName: "Stone", ssi: "SSI0", specification: "spec",
+    price: 100, quantity: 2 };
   let lookups = 0;
   await scanKeywordPages(setup.webContents, "Stone", {
     captureSearch: setup.captureSearch, wait: async () => {},

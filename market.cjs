@@ -55,7 +55,9 @@ function parseResponse(payload, { keyword = "", serverId = SERVER_ID } = {}) {
     };
     items.push(item);
   }
-  const count = payload.dt2?.[0]?.count;
+  const rawCount = payload.dt2?.[0]?.count;
+  const count = typeof rawCount === "string" && /^\d+$/.test(rawCount)
+    ? Number(rawCount) : rawCount;
   return {
     items, errors,
     reportedCount: Number.isSafeInteger(count) && count >= 0 ? count : null,
@@ -98,13 +100,14 @@ function listingIdentity(item) {
   ])).digest("hex");
 }
 
-function analyze(items, history = []) {
+function analyze(items, history = [], recent = []) {
   const groups = new Map();
   const latest = new Map();
   for (const item of [...history, ...items]) {
     if (!Number.isSafeInteger(item.price) || item.price <= 0 ||
         item.serverId !== SERVER_ID || item.marketKind === "ASK_HISTORY" ||
-        item.marketKind === "SALE_HISTORY" || item.storeType !== "販售" ||
+        item.marketKind === "SALE_HISTORY" || item.marketKind === "RECENT_ASK" ||
+        item.storeType !== "販售" ||
         !item.specComplete || !item.shop) continue;
     latest.set(listingIdentity(item), item);
   }
@@ -129,7 +132,11 @@ function analyze(items, history = []) {
       const ratio = item.price / referencePrice;
       const confidence = references.length >= 5 ? "HIGH" :
         references.length >= 3 ? "MEDIUM" : "LOW";
+      const recentSampleCount = new Set(recent.filter((entry) =>
+        entry.serverId === SERVER_ID && entry.specification === item.specification &&
+        entry.shop !== item.shop).map((entry) => entry.shop)).size;
       results.push({ ...item, referencePrice, ratio, sampleCount: references.length,
+        recentSampleCount, baselineSource: "VERIFIED_ACTIVE_ASK",
         confidence, anomalyType: classify(ratio),
         missingZeroMatch: ratio >= 0.085 && ratio <= 0.115 });
     }

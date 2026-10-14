@@ -1,5 +1,6 @@
-async function collectPages(fetchPage, { maxPages = 20 } = {}) {
+async function collectPages(fetchPage, { maxPages = 20, pageSize = 30 } = {}) {
   if (!Number.isInteger(maxPages) || maxPages < 1) throw new Error("maxPages 必須為正整數");
+  if (!Number.isInteger(pageSize) || pageSize < 1) throw new Error("pageSize 必須為正整數");
   const items = [];
   const seen = new Set();
   const seenPages = new Set();
@@ -24,6 +25,10 @@ async function collectPages(fetchPage, { maxPages = 20 } = {}) {
       const key = JSON.stringify([item.serverId, item.shop, item.ssi ?? item.observationKey,
         item.itemName, item.specification, item.price, item.quantity]);
       if (!seen.has(key)) { seen.add(key); items.push(item); }
+    }
+    if (result.items.length > pageSize ||
+        (result.hasNext === true && result.items.length !== pageSize)) {
+      return { items, reportedCount, pageCount: page, status: "PARTIAL" };
     }
     if (result.hasNext === false) {
       return { items, reportedCount, pageCount: page,

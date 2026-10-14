@@ -212,3 +212,95 @@ test("last search time persists even when the scan stops during verification", (
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("partial listings remain recent observations, never current verified asks", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-partial-"));
+  const store = new MarketStore(path.join(directory, "market.sqlite"));
+  try {
+    const item = { serverId: 529, keyword: "Stone", shop: "Shop", ssi: "ssi-1",
+      itemName: "Stone", specification: "full", specComplete: true,
+      storeType: "販售", price: 100, quantity: 1 };
+    const run = store.startRun();
+    store.recordKeywordPages(run, "Stone", { status: "PARTIAL", items: Array(600),
+      reportedCount: 900, pageCount: 20 });
+    store.saveObservations(run, [item], [], { scannedKeywords: [] });
+    assert.equal(store.status().listings, 1);
+    assert.equal(store.activeReferences().length, 0);
+    assert.equal(store.recentReferences()[0].marketKind, "RECENT_ASK");
+    assert.equal(store.recentReferences()[0].observationQuality, "PARTIAL_PAGESET");
+    assert.deepEqual([store.status().lastKeywordPages.observedCount,
+      store.status().lastKeywordPages.reportedCount], [600, 900]);
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("location pending retries once and never duplicates the Discord event", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-pending-location-"));
+  const store = new MarketStore(path.join(directory, "market.sqlite"));
+  try {
+    const item = { serverId: 529, keyword: "Stone", shop: "Shop", ssi: "ssi-1",
+      itemName: "Stone", specification: "full", specComplete: true,
+      storeType: "販售", price: 100, quantity: 1,
+      referencePrice: 1000, sampleCount: 5, confidence: "HIGH",
+      anomalyType: "POSSIBLE_MISSING_ZERO", ratio: 0.1 };
+    const first = store.startRun();
+    store.saveObservations(first, [item], [item], { scannedKeywords: ["Stone"] });
+    assert.equal(store.pendingAlerts().length, 0);
+    assert.equal(store.locationPendingAlerts().length, 1);
+    assert.equal(store.unseenCandidates([item]).length, 1);
+    const located = { ...item, location: { mapName: "prontera", x: 162, y: 92,
+      source: "shop_detail_response", confidence: "MATCHED_SHOP_DETAIL" } };
+    assert.equal(store.saveObservations(store.startRun(), [located], [located],
+      { scannedKeywords: ["Stone"] }).length, 0);
+    assert.equal(store.locationPendingAlerts().length, 0);
+    assert.equal(store.pendingAlerts().length, 1);
+    store.markDelivery(store.pendingAlerts()[0].key, "sent");
+    store.saveObservations(store.startRun(), [located], [located]);
+    assert.equal(store.pendingAlerts().length, 0);
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a sold listing removed during verification stays out of active references", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-sold-"));
+  const store = new MarketStore(path.join(directory, "market.sqlite"));
+  try {
+    const item = { serverId: 529, keyword: "Stone", shop: "Shop", ssi: "ssi-1",
+      itemName: "Stone", specification: "full", specComplete: true,
+      storeType: "販售", price: 100, quantity: 1 };
+    const run = store.startRun();
+    store.saveObservations(run, [item], [], { scannedKeywords: ["Stone"] });
+    assert.equal(store.activeReferences().length, 1);
+    store.markListingUnavailable(item);
+    store.saveObservations(run, [], [], {});
+    assert.equal(store.activeReferences().length, 0);
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a newer partial observation revokes an outdated active asking price", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "roz-price-change-"));
+  const store = new MarketStore(path.join(directory, "market.sqlite"));
+  try {
+    const item = { serverId: 529, keyword: "Stone", shop: "Shop", ssi: "ssi-1",
+      itemName: "Stone", specification: "full", specComplete: true,
+      storeType: "販售", price: 100, quantity: 1 };
+    store.saveObservations(store.startRun(), [item], [],
+      { scannedKeywords: ["Stone"] });
+    assert.equal(store.activeReferences()[0].price, 100);
+    store.saveObservations(store.startRun(), [{ ...item, price: 120 }], [],
+      { scannedKeywords: [] });
+    assert.equal(store.activeReferences().length, 0);
+    assert.ok(store.recentReferences().some((entry) =>
+      entry.price === 120 && entry.observationQuality === "PARTIAL_PAGESET"));
+  } finally {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

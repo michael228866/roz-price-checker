@@ -27,9 +27,15 @@ intervalInput.value = localStorage.getItem("intervalMinutes") || "10";
 function showMarketStatus(status) {
   const coverage = status.coverage;
   document.querySelector("#market-status").textContent =
-    `已知商品 ${status.catalog} 筆 · 已存掛單 ${status.listings} 筆 · 待送通知 ${status.pendingAlerts} 筆 · 最近掃描 ${status.lastRun?.status || "無"}`;
+    `已知商品 ${status.catalog} 筆 · 已存掛單 ${status.listings} 筆 · 待補座標 ${status.locationPending ?? 0} 筆 · 待送通知 ${status.pendingAlerts} 筆 · 最近掃描 ${status.lastRun?.status || "無"}`;
   if (coverage) document.querySelector("#market-status").textContent +=
     `・索引覆蓋 ${coverage.scanned ?? 0}/${coverage.known ?? 0}`;
+  const pages = status.lastKeywordPages;
+  if (pages?.status !== "COMPLETE") {
+    document.querySelector("#market-status").textContent += pages
+      ? `・「${pages.keyword}」部分掛單 ${pages.observedCount}/${pages.reportedCount ?? "?"}（未作完整行情）`
+      : "";
+  }
   const run = status.lastCompletedRun;
   lastScan.textContent = run?.finished_at
     ? `上次掃描：${new Date(run.finished_at).toLocaleString("zh-TW")}（${run.status === "COMPLETE" ? "完成" : "部分完成"}，${run.listings_parsed} 筆掛單）`

@@ -48,7 +48,9 @@ function checkpointPath() {
 }
 
 function saveCheckpoint(progress) {
-  fs.writeFileSync(checkpointPath(), JSON.stringify(progress));
+  const temporary = `${checkpointPath()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(progress));
+  fs.renameSync(temporary, checkpointPath());
 }
 
 function clearCheckpoint() {
@@ -60,8 +62,10 @@ function loadCheckpoint() {
     const value = JSON.parse(fs.readFileSync(checkpointPath(), "utf8"));
     return Array.isArray(value.keywords) && Array.isArray(value.listings) &&
       Number.isInteger(value.nextIndex) && value.nextIndex >= 0 &&
-      value.nextIndex < value.keywords.length && Number.isInteger(value.runId)
-      ? { ...value, catalogDue: value.catalogDue ?? [], pageStatuses: value.pageStatuses ?? [] } : null;
+      value.nextIndex <= value.keywords.length && Number.isInteger(value.runId)
+      ? { ...value, phase: ["SCANNING", "SNAPSHOT_SAVED", "VERIFYING"]
+        .includes(value.phase) ? value.phase : "SCANNING",
+      catalogDue: value.catalogDue ?? [], pageStatuses: value.pageStatuses ?? [] } : null;
   } catch { return null; }
 }
 
@@ -227,7 +231,9 @@ async function scan(resumeState = null) {
     if (!progress) {
       const { keywords, wasCapped, hotKeywordCount, catalogDue } = await getScanKeywords();
       progress = { keywords, wasCapped, hotKeywordCount, catalogDue,
-        listings: [], pageStatuses: [], nextIndex: 0, runId: marketStore.startRun() };
+        listings: [], pageStatuses: [], nextIndex: 0, phase: "SCANNING",
+        runId: marketStore.startRun() };
+      saveCheckpoint(progress);
     }
     activeProgress = progress;
     if (generation !== scanGeneration) return;
@@ -251,6 +257,9 @@ async function scan(resumeState = null) {
         runId: progress.runId
       });
       if (generation !== scanGeneration) return;
+      marketStore.recordKeywordPages(progress.runId, keywords[index], page);
+      marketStore.saveObservations(progress.runId, page.items.flatMap(toObservation), [],
+        { scannedKeywords: page.status === "COMPLETE" ? [keywords[index]] : [] });
       listings.push(...page.items);
       progress.pageStatuses.push(page.status);
       if (progress.catalogDue?.includes(keywords[index])) {
@@ -263,9 +272,19 @@ async function scan(resumeState = null) {
     const completed = new Set(keywords.filter((_, index) =>
       progress.pageStatuses[index] === "COMPLETE"));
     const observations = listings.flatMap(toObservation)
-      .filter((item) => completed.has(item.keyword) && item.serverId === SERVER_ID);
-    const analyses = analyze(observations, marketStore.activeReferences());
+      .filter((item) => item.serverId === SERVER_ID);
+    if (progress.phase === "SCANNING") {
+      marketStore.saveObservations(progress.runId, observations, [],
+        { scannedKeywords: [...completed] });
+      progress.phase = "SNAPSHOT_SAVED";
+      saveCheckpoint(progress);
+    }
+    const trusted = observations.filter((item) => completed.has(item.keyword));
+    const analyses = analyze(trusted, marketStore.activeReferences(),
+      marketStore.recentReferences());
     const candidates = marketStore.unseenCandidates(analyses, thresholdRatio);
+    progress.phase = "VERIFYING";
+    saveCheckpoint(progress);
     for (const keyword of new Set(candidates.map((item) => item.keyword))) {
       if (generation !== scanGeneration) return;
       await wait(keywordDelayMs);
@@ -280,12 +299,17 @@ async function scan(resumeState = null) {
           item._confirmed = false;
           item.location = null;
         }
+      } else {
+        for (const item of candidates.filter((entry) =>
+          entry.keyword === keyword && entry._confirmed !== true)) {
+          marketStore.markListingUnavailable(item);
+        }
       }
     }
     const confirmed = analyses.filter((item) =>
       !candidates.includes(item) || item._confirmed === true);
-    const freshCandidates = marketStore.saveObservations(progress.runId, observations, confirmed,
-      { maxAlertRatio: thresholdRatio, scannedKeywords: [...completed] }).map((item) => ({
+    const freshCandidates = marketStore.saveObservations(progress.runId, [], confirmed,
+      { maxAlertRatio: thresholdRatio }).map((item) => ({
         ...item, navigation: navigationCommand(item.location)
       }));
     marketStore.finishRun(progress.runId,
@@ -330,6 +354,22 @@ async function scan(resumeState = null) {
     if (generation !== scanGeneration) return;
     if (progress?.catalogDue?.includes(progress.keywords[progress.nextIndex])) {
       marketStore.markKeyword(progress.keywords[progress.nextIndex], false);
+    }
+    if (progress && ["SNAPSHOT_SAVED", "VERIFYING"].includes(progress.phase)) {
+      if (scanTimer) clearInterval(scanTimer);
+      scanTimer = null;
+      pausedScan = progress;
+      saveCheckpoint(progress);
+      marketStore.finishRun(progress.runId, "PARTIAL", {
+        attempted: progress.nextIndex, succeeded: progress.pageStatuses
+          .filter((status) => status === "COMPLETE").length,
+        listings: progress.listings.length,
+        paginationStatus: "PAGINATION_UNVERIFIED"
+      }, "CANDIDATE_VERIFICATION_INTERRUPTED");
+      appWindow?.webContents.send("market-status", marketStore.status());
+      appWindow?.webContents.send("scan-state", "paused");
+      sendStatus(`掛單快照已保存；候選確認中斷：${error.message}。請處理後按「驗證完成，繼續」。`, "error");
+      return;
     }
     if (progress && /登入|驗證|驗證碼/.test(error.message)) {
       if (scanTimer) clearInterval(scanTimer);

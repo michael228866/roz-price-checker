@@ -53,9 +53,12 @@ test("resumes after human verification without losing completed keywords", async
     dueCatalog() { return []; }
     historicalReferences() { return []; }
     activeReferences() { return []; }
+    recentReferences() { return []; }
+    markListingUnavailable() {}
     unseenCandidates() { return []; }
     markKeyword() {}
     markSearchAttempt() {}
+    recordKeywordPages() {}
     startRun() { return 1; }
     finishRun() {}
     saveObservations() { return []; }
@@ -106,4 +109,20 @@ test("a second app instance quits before opening the shared user data", () => {
   });
   assert.equal(quits, 1);
   assert.equal(readyCalls, 0);
+});
+
+test("checkpoint after the final keyword resumes the analysis phase", () => {
+  const directory = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "roz-checkpoint-"));
+  const checkpoint = { keywords: ["Stone"], listings: [], pageStatuses: ["COMPLETE"],
+    nextIndex: 1, phase: "SCANNING", runId: 7 };
+  fs.writeFileSync(path.join(directory, "scan-checkpoint.json"), JSON.stringify(checkpoint));
+  const source = `${fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8")}\n` +
+    "globalThis.readCheckpointForTest = loadCheckpoint;";
+  const context = { require: (name) => name === "electron" ? {
+    app: { requestSingleInstanceLock: () => true, whenReady: () => new Promise(() => {}),
+      on() {}, getPath: () => directory }, ipcMain: { handle() {} }
+  } : require(name), __dirname };
+  vm.runInNewContext(source, context);
+  try { assert.equal(context.readCheckpointForTest()?.nextIndex, 1); }
+  finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });

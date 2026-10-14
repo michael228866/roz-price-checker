@@ -66,3 +66,17 @@ test("historical asking prices are not treated as active comparables", () => {
     ({ ...item(shop, 1000), marketKind: "ASK_HISTORY" }));
   assert.equal(analyze([cheap], history).length, 0);
 });
+
+test("recent observations and sale history are separate from verified asking baselines", () => {
+  const cheap = item("A", 100);
+  const recent = ["B", "C", "D"].map((shop) =>
+    ({ ...item(shop, 1000), marketKind: "RECENT_ASK" }));
+  const sales = ["E", "F", "G"].map((shop) =>
+    ({ ...item(shop, 1000), marketKind: "SALE_HISTORY" }));
+  assert.equal(analyze([cheap], recent.concat(sales)).length, 0);
+});
+
+test("numeric dt2 count string is accepted as a total; unsafe values remain unverified", () => {
+  assert.equal(parseResponse({ dt: [], dt2: [{ count: "900" }] }).reportedCount, 900);
+  assert.equal(parseResponse({ dt: [], dt2: [{ count: "900x" }] }).reportedCount, null);
+});
