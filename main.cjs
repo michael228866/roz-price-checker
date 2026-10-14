@@ -116,6 +116,10 @@ function createAppWindow() {
     }
   });
   appWindow.loadFile("index.html");
+  appWindow.once("ready-to-show", () => {
+    appWindow.show();
+    appWindow.focus();
+  });
   appWindow.webContents.once("did-finish-load", () => {
     appWindow.webContents.send("market-status", marketStore.status());
     if (pausedScan) {

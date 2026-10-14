@@ -34,7 +34,7 @@ function launch(run = spawnSync, start = spawn) {
   try {
     child = start(electronExe, ["."], {
       cwd: path.resolve(__dirname), detached: true,
-      stdio: ["ignore", log, log], windowsHide: true, env: environment
+      stdio: ["ignore", log, log], windowsHide: false, env: environment
     });
   } finally { fs.closeSync(log); }
   if (!child.pid) throw new Error("Electron 啟動失敗。");

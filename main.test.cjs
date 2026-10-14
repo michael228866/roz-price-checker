@@ -35,6 +35,7 @@ test("resumes after human verification without losing completed keywords", async
     }
     loadFile() {}
     loadURL() {}
+    once() {}
     on() {}
     focus() {}
     isDestroyed() { return false; }
