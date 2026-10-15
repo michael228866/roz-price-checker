@@ -8,7 +8,7 @@ function sameListing(row, item) {
     row.quantity === item.quantity;
 }
 
-async function captureShopResponse(webContents, keyword, rowStart = 1) {
+async function captureShopResponse(webContents, keyword, rowStart = 1, onRequest = () => {}) {
   const debuggerApi = webContents.debugger;
   if (!debuggerApi || debuggerApi.isAttached()) return null;
   const requests = new Map();
@@ -74,6 +74,7 @@ async function captureShopResponse(webContents, keyword, rowStart = 1) {
       }
       request.matched = true;
       count += 1;
+      onRequest();
       if (count > 1) status = "ambiguous";
       await finishRequest(params.requestId, request);
       return;
@@ -139,6 +140,7 @@ function enrichVisibleRows(rows, parsed) {
     if (matches.length !== 1) return row;
     used.add(matches[0].index);
     return { ...row, specification: matches[0].item.specification,
+      specificationJson: matches[0].item.specificationJson,
       specComplete: matches[0].item.specComplete, ssi: matches[0].item.ssi,
       rawItemName: matches[0].item.itemName,
       source: "ui_response" };

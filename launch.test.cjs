@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const path = require("node:path");
 const { existingInstanceCount, launch } = require("./launch.cjs");
 
 test("launcher detects another main Electron process without starting a second one", () => {
@@ -28,17 +29,27 @@ test("launcher reports a no-renderer process instead of claiming the UI is open"
 test("launcher detaches Electron from the BAT process", () => {
   let unref = false;
   let options;
+  const fileCalls = [];
+  const fileSystem = {
+    mkdirSync(...args) { fileCalls.push(["mkdir", ...args]); },
+    openSync(...args) { fileCalls.push(["open", ...args]); return 42; },
+    closeSync(...args) { fileCalls.push(["close", ...args]); }
+  };
   const count = () => ({ status: 0, stdout: "0" });
   const start = (_exe, args, value) => {
     assert.deepEqual(args, ["."]);
     options = value;
     return { pid: 123, once() {}, unref() { unref = true; } };
   };
-  assert.equal(launch(count, start), 0);
+  assert.equal(launch(count, start, fileSystem), 0);
   assert.equal(options.detached, true);
   assert.equal(options.windowsHide, false);
   assert.equal(options.stdio[0], "ignore");
-  assert.equal(typeof options.stdio[1], "number");
+  assert.deepEqual(options.stdio, ["ignore", 42, 42]);
+  assert.deepEqual(fileCalls[0], ["mkdir", path.dirname(fileCalls[1][1]), { recursive: true }]);
+  assert.equal(path.basename(fileCalls[1][1]), "startup.log");
+  assert.equal(fileCalls[1][2], "a");
+  assert.deepEqual(fileCalls[2], ["close", 42]);
   assert.equal(options.env.ELECTRON_RUN_AS_NODE, undefined);
   assert.equal(unref, true);
 });

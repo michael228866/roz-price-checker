@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ROZ 本地行情中心</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
+<body><header><h1>ROZ 本地行情中心</h1><p>西格倫 · Server ID 529 · 本地資料</p></header>
+<nav><button data-page="overview">市場總覽</button><button data-page="items">商品搜尋</button><button data-page="history">歷史價格</button><button data-page="alerts">警報中心</button></nav>
+<main>
+<section id="overview"><h2>市場總覽</h2><div id="summary"></div><h3>資料來源</h3><div id="sources"></div></section>
+<section id="items" hidden><h2>商品搜尋</h2><form id="search"><input id="query" aria-label="商品名稱" placeholder="輸入中文商品名稱"><button>搜尋</button></form><div id="item-results"></div><button id="more-items" hidden>下一頁</button><h3>掛單</h3><div id="listing-results"></div><button id="more-listings" hidden>更多掛單</button></section>
+<section id="history" hidden><h2>歷史價格分析</h2><p>從商品搜尋選取規格後查看。</p><select id="history-range" aria-label="時間範圍"><option value="1d">1 天</option><option value="7d" selected>7 天</option><option value="30d">30 天</option></select><div id="history-results"></div></section>
+<section id="alerts" hidden><h2>警報中心</h2><div id="alert-results"></div></section><p id="message" role="status"></p></main></body></html>

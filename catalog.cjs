@@ -1,4 +1,4 @@
-function parseCsv(text) {
+function parseCsvRows(text) {
   const rows = [];
   let row = [];
   let value = "";
@@ -20,6 +20,11 @@ function parseCsv(text) {
   if (quoted) throw new Error("CSV 引號未結束");
   row.push(value);
   if (row.some((cell) => cell.trim())) rows.push(row);
+  return rows;
+}
+
+function parseCsv(text) {
+  const rows = parseCsvRows(text);
   if (!rows.length) return [];
   const headers = rows.shift().map((cell) => cell.trim().replace(/^\uFEFF/, ""));
   const nameIndex = headers.findIndex((header) => ["itemName", "name", "商品名稱"].includes(header));
@@ -36,4 +41,4 @@ function parseCsv(text) {
   return [...items.values()];
 }
 
-module.exports = { parseCsv };
+module.exports = { parseCsv, parseCsvRows };

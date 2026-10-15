@@ -16,6 +16,31 @@ npm.cmd start
 3. 設定低價門檻與掃描間隔後按「開始定時掃描」。預設 10 分鐘；可設定 5–120 分鐘。每個關鍵字間隔至少 3 秒，單輪最多 20 個關鍵字。這些設定不代表網站允許該頻率，應遵守站方要求。
 4. 若網站再次要求驗證，掃描暫停並切到官方視窗。親自處理後按「驗證完成，繼續」。遇到網站限流時請停止使用，確認站方允許的方式與頻率後再操作。
 
+## V2 本地行情中心
+
+Electron 啟動後按「開啟本地行情中心」，系統瀏覽器會開啟自動分配連接埠的 `127.0.0.1` 網站。網站只讀取現有本機 SQLite，不會觸發 GNJOY 搜尋。提供市場總覽、商品搜尋、掛單與歷史開價、警報中心；來源及觀測時間會在查詢結果顯示。網站不提供掃描或匯入寫入端點。關閉 Electron 後本地網站停止。
+
+`ROZ_FRESHNESS_MINUTES` 可調整本地「最近觀測」顯示門檻，範圍 1–1440 分鐘，預設 15 分鐘。此狀態不保證掛單仍在販售。
+
+「授權行情檔案匯入」須由使用者提供來源 ID、授權依據及 CSV／JSON 檔案。檔案大小上限 5 MB、單次 50000 列。JSON 為物件陣列；CSV 第一列為欄名。必要欄位：`serverId,itemName,shop,price,quantity,storeType,observedAt,sourceListingId,sourceId`。`serverId` 必須為 529，`storeType` 必須為 `販售`，時間格式為 UTC ISO 8601。完整規格欄位：`itemRefining,ItemGradeLevel,DefaultSlotCount,slot_1,slot_2,slot_3,slot_4,RandomOpt1,RandomOpt2,RandomOpt3,RandomOpt4,RandomOpt5`。缺少完整規格的資料會保存，但不會參與精確規格候選分析。匯入座標不會被當成官方驗證位置。
+
+```csv
+serverId,itemName,shop,price,quantity,storeType,itemRefining,ItemGradeLevel,DefaultSlotCount,slot_1,slot_2,slot_3,slot_4,RandomOpt1,RandomOpt2,RandomOpt3,RandomOpt4,RandomOpt5,observedAt,sourceListingId,sourceId
+529,魔靈石,範例商店,100,1,販售,0,0,0,0,0,0,0,0,0,0,0,0,2026-10-15T00:00:00Z,example-1,my-export
+```
+
+匯入會回報拒絕列與原因；同來源、相同內容的檔案不會再次匯入。匯入觀測與掃描觀測使用同一個 SQLite Store 寫入。匯入資料可能進入待確認候選，不會直接產生 Discord 正式低價通知。官方 API 來源預設為 `AUTHORIZATION_REQUIRED`，不會自動啟用。
+
+若不同授權來源有共同且可靠的掛單識別，可選填 `canonicalListingId`。相同商店、完整規格與 `canonicalListingId` 會共用本地掛單身份；原始來源與各自的 `sourceListingId` 仍保留在來源觀測表。未提供共同 ID 時不猜測跨來源是否為同筆掛單，行情比較仍會按獨立賣家去重。
+
+檔案解析與批次寫入在單一 Worker 中完成。匯入期間會暫停新的掃描、索引寫入及通知重試；本地行情網站仍可查詢已提交的資料。
+
+Discord 發送前會將通知標記為 `sending`。若程序在發送與回寫間中斷，下次啟動會標記為 `uncertain`，停止自動重送。請先確認 Discord 是否已收到，再於 Electron 輸入警報 ID，使用「人工重試通知」。Discord 不提供本工具可用的絕對 exactly-once 保證。
+
+完成掛單二次確認後若商店座標仍未取得，系統先保留約 60 秒供座標重試；逾時後可傳送通知並明確標示「尚未取得商店位置」，不猜測 `/navi`。
+
+備份資料庫時請使用 SQLite 一致性備份工具，或先關閉 Electron 再複製使用者資料夾中的 `market.sqlite`。還原前先關閉 Electron，保存目前檔案副本，避免覆蓋較新的資料。不要單獨複製正在寫入的 WAL 主檔。
+
 CSV 範例：
 
 ```csv

@@ -69,7 +69,8 @@ test("resumes after human verification without losing completed keywords", async
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8"), {
     require: (name) => name === "electron" ? electron
       : name === "./store.cjs" ? { MarketStore: FakeStore }
-      : name === "./shop_scanner.cjs" ? { scanKeywordPages: async (_webContents, keyword) => {
+      : name === "./shop_scanner.cjs" ? { challengeVisible: async () => false,
+        scanKeywordPages: async (_webContents, keyword) => {
         queries += 1;
         if (queries === 2) throw new Error("請完成圖形驗證");
         return { status: "COMPLETE", items: [{ keyword, shop: `shop${queries}`,
@@ -94,6 +95,81 @@ test("resumes after human verification without losing completed keywords", async
   handlers.get("stop-scanning")();
   await assert.rejects(handlers.get("resume-scanning")(), /沒有可繼續的掃描/);
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("challenge before the search form is ready keeps a resumable checkpoint", async () => {
+  const directory = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "roz-early-challenge-"));
+  const handlers = new Map();
+  let challenged = true;
+  let searched = 0;
+  class BrowserWindow {
+    constructor() { this.webContents = { send() {}, once() {}, on() {},
+      executeJavaScript: async () => true }; }
+    loadFile() {} loadURL() {} once() {} on() {} show() {} focus() {}
+    isDestroyed() { return false; }
+  }
+  class FakeStore {
+    dueCatalog() { return []; } activeReferences() { return []; }
+    recentReferences() { return []; } unseenCandidates() { return []; }
+    startRun() { return 1; } finishRun() {} markSearchAttempt() {}
+    saveObservations() { return []; } recordKeywordPages() {}
+    pendingAlerts() { return []; } status() { return { lastRun: null }; }
+  }
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8"), {
+    require: (name) => name === "electron" ? {
+      app: { requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(),
+        on() {}, getPath: () => directory }, BrowserWindow,
+      ipcMain: { handle: (key, callback) => handlers.set(key, callback) },
+      safeStorage: { isEncryptionAvailable: () => false },
+      Notification: { isSupported: () => false }
+    } : name === "./store.cjs" ? { MarketStore: FakeStore }
+      : name === "./shop_scanner.cjs" ? {
+        challengeVisible: async () => challenged,
+        scanKeywordPages: async () => { searched += 1; return { status: "COMPLETE", items: [] }; }
+      } : require(name),
+    __dirname, setTimeout: (callback) => callback(), setInterval: () => 1, clearInterval() {}
+  });
+  await Promise.resolve();
+  try {
+    await handlers.get("start-scanning")(null, { keywords: ["Stone"], ratio: 0.15 });
+    assert.equal(searched, 0);
+    const checkpoint = JSON.parse(fs.readFileSync(path.join(directory, "scan-checkpoint.json"), "utf8"));
+    assert.equal(checkpoint.planned, false);
+    challenged = false;
+    await handlers.get("resume-scanning")();
+    assert.equal(searched, 1);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("Electron opens the local market URL in the system browser", async () => {
+  const directory = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "roz-local-open-"));
+  const handlers = new Map();
+  let opened;
+  class BrowserWindow {
+    constructor() { this.webContents = { send() {}, once() {}, on() {} }; }
+    loadFile() {} once() {} show() {} focus() {}
+  }
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8"), {
+    require: (name) => name === "electron" ? {
+      app: { requestSingleInstanceLock: () => true,
+        whenReady: () => Promise.resolve(), on() {}, getPath: () => directory },
+      BrowserWindow, ipcMain: { handle: (key, callback) => handlers.set(key, callback) },
+      shell: { openExternal: async (url) => { opened = url; } },
+      safeStorage: { isEncryptionAvailable: () => false }
+    } : name === "./store.cjs" ? { MarketStore: class {
+      constructor() { this.db = {}; }
+      markInterruptedDeliveries() {} status() { return { lastRun: null }; }
+    } } : name === "./market_repository.cjs" ? { MarketRepository: class {} }
+      : name === "./local_server.cjs" ? { createLocalServer: () => ({
+        start: async () => "http://127.0.0.1:32123/", close: async () => {}
+      }) } : require(name),
+    __dirname, process, setInterval: () => 1, clearInterval() {}
+  });
+  await new Promise(setImmediate);
+  try {
+    await handlers.get("open-local-market")();
+    assert.equal(opened, "http://127.0.0.1:32123/");
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("a second app instance quits before opening the shared user data", () => {

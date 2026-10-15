@@ -10,6 +10,30 @@ const statusBox = document.querySelector("#status");
 const resultsBox = document.querySelector("#results");
 const lastScan = document.querySelector("#last-scan");
 const lastSearch = document.querySelector("#last-search");
+document.querySelector("#open-local-market").addEventListener("click", () =>
+  window.shopAlert.openLocalMarket().catch((error) => setStatus(error.message, "error")));
+document.querySelector("#import-market").addEventListener("click", async () => {
+  const file = document.querySelector("#market-file").files[0];
+  if (!file) { setStatus("請先選擇 CSV 或 JSON 檔案。", "error"); return; }
+  try {
+    const report = await window.shopAlert.importMarketFile({
+      sourceId: document.querySelector("#market-source").value.trim(),
+      authorizationReference: document.querySelector("#market-authorization").value.trim(),
+      format: file.name.toLowerCase().endsWith(".json") ? "json" : "csv",
+      content: await file.text()
+    });
+    setStatus(`匯入 ${report.inserted} 筆，拒絕 ${report.rejected} 筆。${report.duplicate ? "此檔案已匯入。" : ""}${report.errors.slice(0, 5).map((item) => ` 第 ${item.row} 列：${item.error}`).join("；")}`,
+      report.rejected ? "error" : "success");
+  } catch (error) { setStatus(error.message, "error"); }
+});
+document.querySelector("#retry-uncertain").addEventListener("click", async () => {
+  try {
+    const retried = await window.shopAlert.retryUncertainAlert(
+      document.querySelector("#uncertain-alert-key").value.trim());
+    setStatus(retried ? "已排入待送通知。可能重複發送，請先確認 Discord。" : "找不到不確定狀態的通知。",
+      retried ? "success" : "error");
+  } catch (error) { setStatus(error.message, "error"); }
+});
 const alertDialog = document.querySelector("#alert-dialog");
 const alertItems = document.querySelector("#alert-items");
 

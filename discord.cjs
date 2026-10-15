@@ -16,8 +16,14 @@ async function sendDiscord(url, alert, fetchImpl = fetch) {
   const navigation = navigationCommand(location);
   const locationText = navigation
     ? `${location.mapName} ${location.x}/${location.y}` : UNKNOWN_LOCATION;
+  let specification = "規格未記錄";
+  try {
+    if (alert.specificationJson) specification = Object.entries(JSON.parse(alert.specificationJson))
+      .filter(([, value]) => value !== null && value !== "" && value !== "0" && value !== 0)
+      .map(([key, value]) => `${key}: ${value}`).join("、") || "無附加規格";
+  } catch { /* Preserve notification when an older row has malformed metadata. */ }
   const body = {
-    content: `🚨 ROZ ${alert.confidence === "HIGH" && alert.sampleCount >= 5 ? "高信心低價" : "一般低價"}\n商品：${alert.itemName}\n商店：${alert.shop}\n價格：${alert.price.toLocaleString()} Z\n參考價：${alert.referencePrice.toLocaleString()} Z\n樣本數：${alert.sampleCount ?? 0}\n類型：${alert.type}\n可信度：${alert.confidence}\n商店位置：${locationText}${navigation ? `\n導航指令：\n\`\`\`text\n${navigation}\n\`\`\`` : ""}\n${shopUrl}`,
+    content: `🚨 ROZ ${alert.confidence === "HIGH" && alert.sampleCount >= 5 ? "高信心低價" : "一般低價"}\n商品：${alert.itemName}\n規格：${specification}\n商店：${alert.shop}\n價格：${alert.price.toLocaleString()} Z\n參考價：${alert.referencePrice.toLocaleString()} Z\n低價比例：${(alert.price / alert.referencePrice * 100).toFixed(1)}%\n樣本數：${alert.sampleCount ?? 0}\n類型：${alert.type}\n可信度：${alert.confidence}\n觀測時間：${alert.observedAt ?? "未知"}\n來源：${alert.source ?? "GNJOY UI"}\n商店位置：${locationText}${navigation ? `\n導航指令：\n\`\`\`text\n${navigation}\n\`\`\`` : ""}\n${shopUrl}`,
     allowed_mentions: { parse: [] }
   };
   const response = await fetchImpl(url, {

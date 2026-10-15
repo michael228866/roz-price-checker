@@ -5,15 +5,31 @@ const { captureShopResponse, captureShopLocation, enrichVisibleRows,
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function challengeVisible(webContents) {
+  return webContents.executeJavaScript(`(() => {
+    const visible = (element) => !!element && getComputedStyle(element).display !== 'none' &&
+      getComputedStyle(element).visibility !== 'hidden' && element.getClientRects().length > 0;
+    const dialogs = Array.from(document.querySelectorAll(
+      '.swal2-popup, [role="dialog"], .modal.show, .modal.in')).filter(visible);
+    if (dialogs.some((element) => /圖形驗證|驗證碼|安全驗證|人機驗證|請先登入/.test(element.textContent)))
+      return true;
+    return Array.from(document.querySelectorAll('iframe')).some((frame) => visible(frame) &&
+      /captcha|recaptcha|hcaptcha|turnstile|驗證/i.test(
+        [frame.src, frame.title, frame.id].join(' ')));
+  })()`);
+}
+
 async function scanKeywordPages(webContents, keyword, { isActive = () => true,
   wait = pause, targets = [], runId = 0, maxPages = 20,
+  onRequest = () => {},
   captureSearch = captureShopResponse, captureLocation = captureShopLocation,
   enrichRows = enrichVisibleRows, rowsMatch = matchesVisible } = {}) {
   return collectPages(async (pageNumber) => {
     if (!isActive()) throw new Error("SCAN_CANCELLED");
     if (pageNumber > 1) await wait(3000);
+    if (await challengeVisible(webContents)) throw new Error("查詢頁要求圖形驗證，請由使用者完成。");
     const capture = await captureSearch(webContents, keyword,
-      (pageNumber - 1) * 30 + 1);
+      (pageNumber - 1) * 30 + 1, onRequest);
     if (!capture) throw new Error("無法監聽官方查詢回應，已停止掃描。");
     try {
       capture.arm();
@@ -79,6 +95,9 @@ async function scanKeywordPages(webContents, keyword, { isActive = () => true,
       for (let attempt = 0; attempt < 50; attempt += 1) {
         await wait(500);
         if (!isActive()) throw new Error("SCAN_CANCELLED");
+        if (await challengeVisible(webContents)) {
+          throw new Error("查詢頁要求圖形驗證，請由使用者完成。");
+        }
         const captured = capture.peek();
         if (captured.response?.rateLimited) {
           throw new Error("網站限制查詢（HTTP 403/429），掃描已停止。");
@@ -169,4 +188,4 @@ async function scanKeywordPages(webContents, keyword, { isActive = () => true,
   }, { maxPages });
 }
 
-module.exports = { scanKeywordPages };
+module.exports = { scanKeywordPages, challengeVisible };

@@ -16,6 +16,7 @@ function fixture(count = 31) {
   let current = 0;
   const requested = [];
   const webContents = { executeJavaScript: async (script) => {
+    if (script.includes("getClientRects")) return false;
     if (script.includes("return { started: true }")) {
       if (script.includes("const page = 2;")) {
         assert.ok(script.includes("'javascript:goPage(' + page + ')'"));
@@ -47,6 +48,19 @@ test("normal UI scanner collects page two and accepts identical settled DOM", as
   assert.deepEqual(setup.requested, [1, 31]);
   assert.equal(result.items.length, 31);
   assert.equal(result.status, "COMPLETE");
+});
+
+test("visible verification pauses before sending a search", async () => {
+  const setup = fixture(1);
+  let captures = 0;
+  setup.webContents.executeJavaScript = async (script) => {
+    assert.ok(script.includes("getClientRects"));
+    return true;
+  };
+  await assert.rejects(scanKeywordPages(setup.webContents, "Stone", {
+    captureSearch: async () => { captures += 1; }
+  }), /圖形驗證/);
+  assert.equal(captures, 0);
 });
 
 test("final candidate receives only coordinates from its exact current listing", async () => {

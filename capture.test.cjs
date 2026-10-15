@@ -13,6 +13,7 @@ test("enriches only unambiguous normal UI response matches", () => {
 
 test("matches only the armed search request and its own response", async () => {
   const debuggerApi = new EventEmitter();
+  let counted = 0;
   let attached = false;
   debuggerApi.isAttached = () => attached;
   debuggerApi.attach = () => { attached = true; };
@@ -20,7 +21,8 @@ test("matches only the armed search request and its own response", async () => {
   debuggerApi.sendCommand = async (command) => command === "Network.getResponseBody"
     ? { body: JSON.stringify({ dt: [{ storeName: "A", itemName: "Wanted", itemPrice: 100,
       itemCNT: 1, storetype: 0 }], dt2: [{ count: 1 }] }) } : {};
-  const capture = await captureShopResponse({ debugger: debuggerApi }, "Wanted");
+  const capture = await captureShopResponse({ debugger: debuggerApi }, "Wanted", 1,
+    () => { counted += 1; });
   capture.arm();
   const request = (requestId, keyword, serverId = "529") => debuggerApi.emit("message", null, "Network.requestWillBeSent", {
     requestId, request: { method: "POST", url: "https://event.gnjoy.com.tw/forAjax_shopDeal",
@@ -29,12 +31,14 @@ test("matches only the armed search request and its own response", async () => {
   request("other-server", "Wanted", "999");
   assert.equal(capture.peek().matchedRequests, 0);
   request("wrong", "Other");
+  assert.equal(counted, 0);
   debuggerApi.emit("message", null, "Network.responseReceived", {
     requestId: "wrong", response: { status: 200 }
   });
   debuggerApi.emit("message", null, "Network.loadingFinished", { requestId: "wrong" });
   assert.equal(capture.peek().status, "pending");
   request("right", "Wanted");
+  assert.equal(counted, 1);
   debuggerApi.emit("message", null, "Network.responseReceived", {
     requestId: "right", response: { status: 200 }
   });
@@ -45,6 +49,7 @@ test("matches only the armed search request and its own response", async () => {
   assert.equal(matchesVisible(rows, capture.peek().response), true);
   assert.equal(matchesVisible([{ ...rows[0], price: 200 }], capture.peek().response), false);
   request("duplicate", "Wanted");
+  assert.equal(counted, 2);
   assert.equal(capture.peek().status, "ambiguous");
   capture.close();
 });

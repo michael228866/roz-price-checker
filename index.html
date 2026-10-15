@@ -11,7 +11,7 @@
     <header>
       <div class="eyebrow">RO仙境傳說Online：樂園</div>
       <h1>露天低價提醒</h1>
-      <p>透過官方查詢頁比對同名、同 slot 的販售價格，找出疑似少打一個 0 的候選。</p>
+      <p>以官方查詢頁的完整規格觀測比價，找出疑似低價候選；請親自確認掛單。</p>
     </header>
 
     <section class="panel">
@@ -21,6 +21,7 @@
           <p>每行一個道具關鍵字；找到低價候選時會跳出提醒。</p>
         </div>
         <button class="secondary" id="open-shop">開啟查詢頁／登入</button>
+        <button class="secondary" id="open-local-market">開啟本地行情中心</button>
       </div>
       <label for="keywords">追蹤關鍵字</label>
       <textarea id="keywords" rows="5" placeholder="一般關鍵字：新星&#10;搜尋 +7 道具：+7%道具名稱&#10;搜尋 +10 道具：+10%道具名稱"></textarea>
@@ -35,7 +36,7 @@
           <input id="ratio" type="number" min="1" max="50" value="15">
           <span>%</span>
         </div>
-        <span class="hint">售價不高於同名同 slot 參考中位價的此比例，且至少有 3 筆參考掛單時提醒。</span>
+        <span class="hint">完整規格相同且至少有 3 位獨立賣家作為參考時，按此比例確認候選。</span>
       </div>
       <div class="threshold-row">
         <label for="interval">掃描間隔</label>
@@ -57,9 +58,13 @@
 
     <section class="panel">
       <h2>商品索引與通知</h2>
+      <h3>授權行情檔案匯入</h3>
+      <p>只匯入您有權使用的 CSV 或 JSON。來源 ID 與授權依據會保存在本機資料庫。</p>
+      <div class="actions"><input id="market-file" type="file" accept=".csv,.json,text/csv,application/json"><input id="market-source" placeholder="來源 ID"><input id="market-authorization" placeholder="授權依據"><button class="secondary" id="import-market">匯入行情</button></div>
       <p>匯入 CSV，需有 <code>itemName</code> 欄，可選 <code>tier</code>（P0／P1／P2）。商品索引只代表已知商品，並非全伺服器清單。</p>
       <div class="actions"><input id="catalog-file" type="file" accept=".csv,text/csv"><button class="secondary" id="import-catalog">匯入 CSV</button></div>
       <label for="discord-webhook">Discord Webhook</label>
+      <div class="actions"><input id="uncertain-alert-key" placeholder="不確定通知的警報 ID"><button class="secondary" id="retry-uncertain">人工重試通知</button></div>
       <input id="discord-webhook" type="password" autocomplete="off" placeholder="貼上 Webhook 網址；欄位不會回填">
       <div class="actions"><button class="secondary" id="save-discord">儲存通知設定</button><button class="text-button" id="clear-discord">移除 Webhook</button></div>
       <p id="market-status" class="hint">讀取行情資料庫中…</p>

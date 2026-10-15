@@ -48,6 +48,8 @@ function parseResponse(payload, { keyword = "", serverId = SERVER_ID } = {}) {
       keyword, serverId, shop: String(row.storeName ?? "").trim(),
       itemName: row.itemName, displayName: displayName(row),
       price, quantity, storeType: row.storetype, specification: fingerprint(row),
+      specificationJson: JSON.stringify(Object.fromEntries(specificationFields
+        .map((field) => [field, row[field] ?? null]))),
       ssi: row.SSI2 == null ? null : String(row.SSI2),
       location: parseShopLocation(row, "search_response"),
       specComplete: specificationFields.every((field) => row[field] !== undefined && row[field] !== null),
@@ -103,6 +105,7 @@ function listingIdentity(item) {
 function analyze(items, history = [], recent = []) {
   const groups = new Map();
   const latest = new Map();
+  const current = new Set(items.map(listingIdentity));
   for (const item of [...history, ...items]) {
     if (!Number.isSafeInteger(item.price) || item.price <= 0 ||
         item.serverId !== SERVER_ID || item.marketKind === "ASK_HISTORY" ||
@@ -117,25 +120,36 @@ function analyze(items, history = [], recent = []) {
     groups.get(key).push(item);
   }
   const results = [];
+  const recentSellers = new Map();
+  for (const item of recent) {
+    if (item.serverId !== SERVER_ID) continue;
+    const sellers = recentSellers.get(item.specification) ?? new Set();
+    sellers.add(item.shop);
+    recentSellers.set(item.specification, sellers);
+  }
   for (const group of groups.values()) {
+    const cheapestBySeller = new Map();
     for (const item of group) {
-      if (!items.some((current) => listingIdentity(current) === listingIdentity(item))) continue;
-      const independent = new Map();
-      for (const other of group) {
-        if (listingIdentity(other) === listingIdentity(item) || other.shop === item.shop) continue;
-        const existing = independent.get(other.shop);
-        if (!existing || other.price < existing.price) independent.set(other.shop, other);
-      }
-      const references = [...independent.values()];
-      if (!references.length) continue;
-      const referencePrice = median(references.map((entry) => entry.price));
+      const previous = cheapestBySeller.get(item.shop);
+      if (previous === undefined || item.price < previous) cheapestBySeller.set(item.shop, item.price);
+    }
+    const sorted = [...cheapestBySeller].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]));
+    const sellerIndex = new Map(sorted.map(([shop], index) => [shop, index]));
+    for (const item of group) {
+      if (!current.has(listingIdentity(item))) continue;
+      const excluded = sellerIndex.get(item.shop);
+      const sampleCount = sorted.length - (excluded === undefined ? 0 : 1);
+      if (!sampleCount) continue;
+      const at = (index) => sorted[index + (excluded !== undefined && index >= excluded ? 1 : 0)][1];
+      const middle = Math.floor(sampleCount / 2);
+      const referencePrice = sampleCount % 2 ? at(middle) :
+        (at(middle - 1) + at(middle)) / 2;
       const ratio = item.price / referencePrice;
-      const confidence = references.length >= 5 ? "HIGH" :
-        references.length >= 3 ? "MEDIUM" : "LOW";
-      const recentSampleCount = new Set(recent.filter((entry) =>
-        entry.serverId === SERVER_ID && entry.specification === item.specification &&
-        entry.shop !== item.shop).map((entry) => entry.shop)).size;
-      results.push({ ...item, referencePrice, ratio, sampleCount: references.length,
+      const confidence = sampleCount >= 5 ? "HIGH" :
+        sampleCount >= 3 ? "MEDIUM" : "LOW";
+      const recentGroup = recentSellers.get(item.specification);
+      const recentSampleCount = recentGroup ? recentGroup.size - (recentGroup.has(item.shop) ? 1 : 0) : 0;
+      results.push({ ...item, referencePrice, ratio, sampleCount,
         recentSampleCount, baselineSource: "VERIFIED_ACTIVE_ASK",
         confidence, anomalyType: classify(ratio),
         missingZeroMatch: ratio >= 0.085 && ratio <= 0.115 });

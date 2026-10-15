@@ -1,14 +1,18 @@
 const { app, BrowserWindow, ipcMain, Notification, safeStorage, clipboard,
-  dialog } = require("electron");
+  dialog, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
+const { Worker } = require("node:worker_threads");
 const { SERVER_ID, fromVisibleRows, analyze } = require("./market.cjs");
 const { MarketStore } = require("./store.cjs");
 const { parseCsv } = require("./catalog.cjs");
 const { validWebhook, sendDiscord } = require("./discord.cjs");
-const { scanKeywordPages } = require("./shop_scanner.cjs");
+const { scanKeywordPages, challengeVisible } = require("./shop_scanner.cjs");
 const { navigationCommand } = require("./shop_location.cjs");
 const { planKeywords } = require("./keyword_plan.cjs");
+const { MarketRepository } = require("./market_repository.cjs");
+const { createLocalServer } = require("./local_server.cjs");
+const { AuthorizedFileAdapter } = require("./source_import.cjs");
 
 const shopUrl = "https://event.gnjoy.com.tw/RoZ/RoZ_ShopSearch";
 const keywordDelayMs = 3000;
@@ -28,7 +32,10 @@ let marketStore;
 let discordWebhook = null;
 let activeProgress = null;
 let deliveryInProgress = false;
+let importInProgress = false;
 let deliveryTimer;
+let localServer;
+let localUrl;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) app.quit();
@@ -85,13 +92,14 @@ function loadWebhook() {
 }
 
 async function deliverPendingAlerts() {
-  if (!discordWebhook || deliveryInProgress) return;
+  if (!discordWebhook || deliveryInProgress || importInProgress) return;
   deliveryInProgress = true;
   try {
   for (const alert of marketStore.pendingAlerts()) {
     try {
+      if (!marketStore.claimDelivery(alert.key)) continue;
       await sendDiscord(discordWebhook, alert);
-      marketStore.markDelivery(alert.key, "sent");
+      marketStore.markDelivery(alert.key, "sent", null, null, false);
       logEvent("DISCORD_SENT", { alertKey: alert.key });
     } catch (error) {
       const rateLimited = error.status === 429;
@@ -99,9 +107,13 @@ async function deliverPendingAlerts() {
       const delay = rateLimited ? error.retryAfterMs :
         Math.min(60000 * 2 ** alert.attempts, 3600000);
       const status = permanent || (!rateLimited && alert.attempts + 1 >= 3) ? "failed" : "pending";
-      marketStore.markDelivery(alert.key, status,
-        rateLimited ? "HTTP_429" : error.status ? `HTTP_${error.status}` : "DELIVERY_FAILED",
-        status === "pending" ? new Date(Date.now() + delay).toISOString() : null, !rateLimited);
+      if (rateLimited) {
+        marketStore.markRateLimited(alert.key, new Date(Date.now() + delay).toISOString());
+      } else {
+        marketStore.markDelivery(alert.key, status,
+          error.status ? `HTTP_${error.status}` : "DELIVERY_FAILED",
+          status === "pending" ? new Date(Date.now() + delay).toISOString() : null, false);
+      }
       logEvent("DISCORD_FAILED", { alertKey: alert.key });
       if (rateLimited) break;
     }
@@ -185,6 +197,9 @@ async function waitForShopReady() {
     const ready = await shopWindow.webContents.executeJavaScript(
       "document.readyState === 'complete' && !!document.querySelector('#txb_KeyWord')"
     );
+    if (await challengeVisible(shopWindow.webContents)) {
+      throw new Error("查詢頁要求圖形驗證，請由使用者完成。");
+    }
     if (ready) return;
     await wait(500);
   }
@@ -222,6 +237,7 @@ async function getScanKeywords() {
 function toObservation(row) {
   return fromVisibleRows([row], row.keyword).map((item) => ({
     ...item, specification: row.specification ?? item.specification,
+    specificationJson: row.specificationJson ?? null,
     specComplete: row.specComplete === true, source: row.source ?? item.source,
     ssi: row.ssi ?? null, observationKey: row.observationKey ?? null,
     location: row.location ?? null
@@ -229,7 +245,7 @@ function toObservation(row) {
 }
 
 async function scan(resumeState = null) {
-  if (scanInProgress) return;
+  if (scanInProgress || importInProgress) return;
   if (!shopWindow || shopWindow.isDestroyed()) {
     sendStatus("請先開啟查詢頁並登入。", "error");
     stopScanning();
@@ -241,16 +257,40 @@ async function scan(resumeState = null) {
   sendStatus("掃描中…");
   let progress = resumeState;
   try {
-    await waitForShopReady();
-    if (generation !== scanGeneration) return;
     if (!progress) {
-      const { keywords, wasCapped, hotKeywordCount, catalogDue } = await getScanKeywords();
-      progress = { keywords, wasCapped, hotKeywordCount, catalogDue,
-        listings: [], pageStatuses: [], nextIndex: 0, phase: "SCANNING",
+      progress = { keywords: [], planned: false, listings: [], pageStatuses: [],
+        nextIndex: 0, phase: "SCANNING", catalogDue: [],
+        requestStats: { searches: 0, requests: 0 },
+        ratio: thresholdRatio, intervalMs: scanIntervalMs,
+        config: { watchedKeywords, includeHotKeywords, includeCatalog },
         runId: marketStore.startRun() };
       saveCheckpoint(progress);
     }
+    if (progress.config) {
+      watchedKeywords = progress.config.watchedKeywords;
+      includeHotKeywords = progress.config.includeHotKeywords;
+      includeCatalog = progress.config.includeCatalog;
+    }
+    await waitForShopReady();
+    if (generation !== scanGeneration) return;
+    if (progress.planned === false) {
+      const { keywords, wasCapped, hotKeywordCount, catalogDue } = await getScanKeywords();
+      Object.assign(progress, { keywords, wasCapped, hotKeywordCount, catalogDue,
+        planned: true });
+      saveCheckpoint(progress);
+    }
     activeProgress = progress;
+    if (Number.isFinite(progress.ratio) && progress.ratio >= 0.01 && progress.ratio <= 0.5) {
+      thresholdRatio = progress.ratio;
+    }
+    if (Number.isInteger(progress.intervalMs) && progress.intervalMs >= 300000 &&
+        progress.intervalMs <= 7200000) scanIntervalMs = progress.intervalMs;
+    progress.requestStats ??= { searches: 0, requests: 0 };
+    const onRequest = () => {
+      progress.requestStats.requests += 1;
+      saveCheckpoint(progress);
+      sendStatus(`掃描中：搜尋嘗試 ${progress.requestStats.searches} 次，官方查詢請求 ${progress.requestStats.requests} 次。`);
+    };
     if (generation !== scanGeneration) return;
     const { keywords, wasCapped, hotKeywordCount, listings } = progress;
     if (!keywords.length) {
@@ -266,15 +306,21 @@ async function scan(resumeState = null) {
       if (index > 0 || resumeState) await wait(keywordDelayMs);
       if (generation !== scanGeneration) return;
       marketStore.markSearchAttempt(progress.runId, keywords[index]);
+      progress.requestStats.searches += 1;
+      saveCheckpoint(progress);
       appWindow?.webContents.send("market-status", marketStore.status());
       const page = await scanKeywordPages(shopWindow.webContents, keywords[index], {
         isActive: () => generation === scanGeneration,
-        runId: progress.runId
+        runId: progress.runId, onRequest
       });
       if (generation !== scanGeneration) return;
       marketStore.recordKeywordPages(progress.runId, keywords[index], page);
       marketStore.saveObservations(progress.runId, page.items.flatMap(toObservation), [],
         { scannedKeywords: page.status === "COMPLETE" ? [keywords[index]] : [] });
+      if (page.status === "COMPLETE") {
+        marketStore.recordWatchlist?.(page.items.flatMap(toObservation),
+          "gnjoy-ui", thresholdRatio);
+      }
       listings.push(...page.items);
       progress.pageStatuses.push(page.status);
       if (progress.catalogDue?.includes(keywords[index])) {
@@ -304,9 +350,11 @@ async function scan(resumeState = null) {
       if (generation !== scanGeneration) return;
       await wait(keywordDelayMs);
       marketStore.markSearchAttempt(progress.runId, keyword);
+      progress.requestStats.searches += 1;
+      saveCheckpoint(progress);
       appWindow?.webContents.send("market-status", marketStore.status());
       const result = await scanKeywordPages(shopWindow.webContents, keyword, {
-        isActive: () => generation === scanGeneration, runId: progress.runId,
+        isActive: () => generation === scanGeneration, runId: progress.runId, onRequest,
         targets: candidates.filter((item) => item.keyword === keyword)
       });
       if (result.status !== "COMPLETE") {
@@ -362,7 +410,7 @@ async function scan(resumeState = null) {
     });
     appWindow?.webContents.send("market-status", marketStore.status());
     sendStatus(
-      `掃描完成：查詢 ${keywords.length} 個關鍵字，查到 ${listings.length} 筆，新增 ${freshCandidates.length} 個低價候選。${wasCapped ? "關鍵字超過 20 個，已依序保留前 20 個。" : ""}下一次約 ${scanIntervalMs / 60000} 分鐘後。分頁尚未驗證。`,
+      `掃描完成：查詢 ${keywords.length} 個關鍵字，查到 ${listings.length} 筆，新增 ${freshCandidates.length} 個低價候選。搜尋嘗試 ${progress.requestStats.searches} 次，官方查詢請求 ${progress.requestStats.requests} 次。${wasCapped ? "關鍵字超過 20 個，已依序保留前 20 個。" : ""}下一次約 ${scanIntervalMs / 60000} 分鐘後。分頁尚未驗證。`,
       "success"
     );
   } catch (error) {
@@ -370,10 +418,30 @@ async function scan(resumeState = null) {
     if (progress?.catalogDue?.includes(progress.keywords[progress.nextIndex])) {
       marketStore.markKeyword(progress.keywords[progress.nextIndex], false);
     }
+    if (progress && /登入|驗證|驗證碼/.test(error.message)) {
+      if (scanTimer) clearInterval(scanTimer);
+      scanTimer = null;
+      pausedScan = progress;
+      const status = /請先登入/.test(error.message) ? "AUTH_REQUIRED" : "CHALLENGE_REQUIRED";
+      progress.pauseReason = status;
+      saveCheckpoint(progress);
+      marketStore.finishRun(progress.runId, status, {
+        attempted: progress.nextIndex, succeeded: progress.pageStatuses
+          .filter((value) => value === "COMPLETE").length,
+        listings: progress.listings.length
+      });
+      appWindow?.webContents.send("market-status", marketStore.status());
+      logEvent(status, { runId: progress.runId, ...progress.requestStats });
+      appWindow?.webContents.send("scan-state", "paused");
+      shopWindow?.focus();
+      sendStatus(`${error.message} 請在查詢頁完成處理，再按「驗證完成，繼續」。搜尋嘗試 ${progress.requestStats?.searches ?? 0} 次，官方查詢請求 ${progress.requestStats?.requests ?? 0} 次。`, "error");
+      return;
+    }
     if (progress && ["SNAPSHOT_SAVED", "VERIFYING"].includes(progress.phase)) {
       if (scanTimer) clearInterval(scanTimer);
       scanTimer = null;
       pausedScan = progress;
+      progress.pauseReason = "PARTIAL";
       saveCheckpoint(progress);
       marketStore.finishRun(progress.runId, "PARTIAL", {
         attempted: progress.nextIndex, succeeded: progress.pageStatuses
@@ -384,24 +452,6 @@ async function scan(resumeState = null) {
       appWindow?.webContents.send("market-status", marketStore.status());
       appWindow?.webContents.send("scan-state", "paused");
       sendStatus(`掛單快照已保存；候選確認中斷：${error.message}。請處理後按「驗證完成，繼續」。`, "error");
-      return;
-    }
-    if (progress && /登入|驗證|驗證碼/.test(error.message)) {
-      if (scanTimer) clearInterval(scanTimer);
-      scanTimer = null;
-      pausedScan = progress;
-      saveCheckpoint(progress);
-      const status = /查詢逾時/.test(error.message) ? "PARTIAL" :
-        /請先登入/.test(error.message) ? "AUTH_REQUIRED" : "CHALLENGE_REQUIRED";
-      marketStore.finishRun(progress.runId, status, {
-        attempted: progress.nextIndex + 1, succeeded: progress.nextIndex,
-        listings: progress.listings.length
-      });
-      appWindow?.webContents.send("market-status", marketStore.status());
-      logEvent(status, { runId: progress.runId });
-      appWindow?.webContents.send("scan-state", "paused");
-      shopWindow?.focus();
-      sendStatus(`${error.message} 請在查詢頁完成處理，再按「驗證完成，繼續」。`, "error");
       return;
     }
     const status = /HTTP 403\/429/.test(error.message) ? "RATE_LIMITED" : "FAILED";
@@ -440,6 +490,7 @@ ipcMain.handle("open-shop", () => {
 });
 
 ipcMain.handle("start-scanning", async (_event, config) => {
+  if (importInProgress) throw new Error("行情匯入中，請稍後開始掃描。");
   if (scanInProgress) throw new Error("上一輪掃描尚未結束，請稍候再開始。");
   if (pausedScan) stopScanning();
   const keywords = Array.isArray(config?.keywords)
@@ -470,6 +521,7 @@ ipcMain.handle("start-scanning", async (_event, config) => {
 });
 
 ipcMain.handle("resume-scanning", async () => {
+  if (importInProgress) throw new Error("行情匯入中，請稍後繼續掃描。");
   if (scanInProgress) throw new Error("上一輪掃描尚未結束，請稍候再繼續。");
   if (!pausedScan) throw new Error("目前沒有可繼續的掃描。");
   const progress = pausedScan;
@@ -478,18 +530,55 @@ ipcMain.handle("resume-scanning", async () => {
     pausedScan = progress;
     throw new Error("查詢頁已關閉，請先開啟並完成驗證。");
   }
-  scanTimer = setInterval(scan, scanIntervalMs);
+  scanTimer = setInterval(scan, progress.intervalMs ?? scanIntervalMs);
   appWindow?.webContents.send("scan-state", "running");
   await scan(progress);
 });
 
 ipcMain.handle("stop-scanning", () => stopScanning());
 ipcMain.handle("show-shop", () => shopWindow?.focus());
+ipcMain.handle("open-local-market", async () => {
+  if (!localUrl) throw new Error("本地行情中心尚未啟動。");
+  await shell.openExternal(localUrl);
+});
 ipcMain.handle("import-catalog", (_event, csv) => {
+  if (importInProgress) throw new Error("行情匯入中，請稍後匯入商品索引。");
   if (typeof csv !== "string" || csv.length > 1024 * 1024) throw new Error("CSV 不可超過 1 MB。");
   const count = marketStore.importCatalog(parseCsv(csv));
   appWindow?.webContents.send("market-status", marketStore.status());
   return count;
+});
+ipcMain.handle("import-market-file", async (_event, input) => {
+  if (scanInProgress || importInProgress || deliveryInProgress) {
+    throw new Error("目前有掃描、通知或匯入作業，請稍後重試。");
+  }
+  if (typeof input?.content !== "string" ||
+      Buffer.byteLength(input.content) > 5 * 1024 * 1024) {
+    throw new Error("匯入檔案不可超過 5 MB。");
+  }
+  new AuthorizedFileAdapter(input.sourceId, input.authorizationReference)
+    .validateConfiguration();
+  importInProgress = true;
+  try {
+    const report = await new Promise((resolve, reject) => {
+      const worker = new Worker(path.join(__dirname, "import_worker.cjs"), {
+        workerData: { filename: path.join(app.getPath("userData"), "market.sqlite"),
+          input, ratio: thresholdRatio }
+      });
+      let result;
+      worker.once("message", (message) => { result = message; });
+      worker.once("error", reject);
+      worker.once("exit", (code) => code === 0 && result?.ok ? resolve(result.report) :
+        reject(new Error(result?.error ?? "匯入工作者異常結束")));
+    });
+    appWindow?.webContents.send("market-status", marketStore.status());
+    return report;
+  } finally { importInProgress = false; }
+});
+ipcMain.handle("retry-uncertain-alert", (_event, key) => {
+  if (importInProgress) throw new Error("行情匯入中，請稍後重試通知。");
+  if (typeof key !== "string" || key.length > 200) throw new Error("警報 ID 無效");
+  return marketStore.retryUncertainDelivery(key);
 });
 ipcMain.handle("market-status", () => marketStore.status());
 ipcMain.handle("set-discord", (_event, url) => {
@@ -520,12 +609,33 @@ if (hasSingleInstanceLock) app.on("second-instance", () => {
   }
 });
 
-if (hasSingleInstanceLock) app.whenReady().then(() => {
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
   logStartup("APP_READY");
   marketStore = new MarketStore(path.join(app.getPath("userData"), "market.sqlite"));
+  marketStore.markInterruptedDeliveries?.();
   logStartup("STORE_READY");
   discordWebhook = loadWebhook();
   pausedScan = loadCheckpoint();
+  if (marketStore.db) {
+    const configuredFreshness = Number(process.env.ROZ_FRESHNESS_MINUTES || 15);
+    localServer = createLocalServer(new MarketRepository(marketStore,
+      { freshnessMinutes: configuredFreshness }), {
+      syncStatus: () => ({ state: importInProgress ? "SYNCING" : pausedScan ?
+        pausedScan.pauseReason === "AUTH_REQUIRED" ? "AUTH_REQUIRED" :
+          pausedScan.pauseReason === "PARTIAL" ? "PARTIAL" : "PAUSED_CHALLENGE" :
+        scanInProgress ? "SYNCING" :
+          marketStore.status().lastRun?.status === "RATE_LIMITED" ? "RATE_LIMITED" : "IDLE",
+      officialProgress: activeProgress || pausedScan ? {
+        completedKeywords: (activeProgress ?? pausedScan).nextIndex,
+        totalKeywords: (activeProgress ?? pausedScan).keywords.length,
+        requestStats: (activeProgress ?? pausedScan).requestStats ?? { searches: 0, requests: 0 }
+      } : null,
+      activeSource: importInProgress ? "AUTHORIZED_IMPORT" :
+        scanInProgress ? "gnjoy-ui" : null,
+      asOf: new Date().toISOString() })
+    });
+    localUrl = await localServer.start();
+  }
   createAppWindow();
   deliveryTimer = setInterval(() => deliverPendingAlerts().catch(() =>
     logEvent("DELIVERY_LOOP_FAILED")), 60000);
@@ -536,6 +646,7 @@ if (hasSingleInstanceLock) app.whenReady().then(() => {
 });
 if (hasSingleInstanceLock) app.on("window-all-closed", () => {
   stopScanning();
+  localServer?.close().catch((error) => logStartup("LOCAL_SERVER_CLOSE_FAILED", error));
   if (deliveryTimer) clearInterval(deliveryTimer);
   marketStore?.close();
   if (process.platform !== "darwin") app.quit();

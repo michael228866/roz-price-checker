@@ -13,9 +13,10 @@ async function runScenario({ first, second, analyses = [], checkpoint = null,
   const handlers = new Map();
   const saves = [];
   const unavailable = [];
+  const events = [];
   let searches = 0;
   class BrowserWindow {
-    constructor() { this.webContents = { send() {}, once() {}, on() {},
+    constructor() { this.webContents = { send: (name, value) => events.push({ name, value }), once() {}, on() {},
       executeJavaScript: async () => true }; }
     loadFile() {} loadURL() {} once() {} on() {} show() {} focus() {}
     isDestroyed() { return false; }
@@ -48,8 +49,10 @@ async function runScenario({ first, second, analyses = [], checkpoint = null,
     require: (name) => name === "electron" ? electron
       : name === "./store.cjs" ? { MarketStore: FakeStore }
       : name === "./market.cjs" ? { ...market, analyze: () => analyses }
-      : name === "./shop_scanner.cjs" ? { scanKeywordPages: async (_contents, _keyword, options) => {
+      : name === "./shop_scanner.cjs" ? { challengeVisible: async () => false,
+        scanKeywordPages: async (_contents, _keyword, options) => {
         searches += 1;
+        options.onRequest();
         return searches === 1 ? first : second(options, searches);
       } } : require(name),
     __dirname, setTimeout: (callback) => callback(),
@@ -63,8 +66,10 @@ async function runScenario({ first, second, analyses = [], checkpoint = null,
     }
     else await handlers.get("start-scanning")(null,
       { keywords: ["Stone"], ratio: 0.15 });
+    const savedCheckpoint = fs.existsSync(path.join(directory, "scan-checkpoint.json"))
+      ? JSON.parse(fs.readFileSync(path.join(directory, "scan-checkpoint.json"), "utf8")) : null;
     if (resumeAfterFailure) await handlers.get("resume-scanning")();
-    return { saves, searches, unavailable };
+    return { saves, searches, unavailable, events, savedCheckpoint };
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 }
 
@@ -90,6 +95,19 @@ test("network loss during candidate verification cannot erase first-pass snapsho
     analyses: [candidate], second: () => { throw new Error("NETWORK_LOST"); } });
   assert.ok(result.saves.some((save) => save.items.length === 1 &&
     save.candidates.length === 0));
+});
+
+test("verification challenge pauses with checkpoint and matched request counts", async () => {
+  const candidate = { ...listing, referencePrice: 1000, sampleCount: 5,
+    confidence: "HIGH", anomalyType: "POSSIBLE_MISSING_ZERO", ratio: 0.1 };
+  const result = await runScenario({ first: { status: "COMPLETE", items: [listing] },
+    analyses: [candidate], second: () => { throw new Error("請完成圖形驗證"); } });
+  assert.equal(result.savedCheckpoint.phase, "VERIFYING");
+  assert.equal(result.savedCheckpoint.nextIndex, 1);
+  assert.deepEqual(result.savedCheckpoint.requestStats, { searches: 2, requests: 2 });
+  assert.ok(result.events.some(({ name, value }) => name === "scan-state" && value === "paused"));
+  assert.ok(result.events.some(({ name, value }) => name === "scan-status" &&
+    value.message.includes("官方查詢請求 2 次")));
 });
 
 test("verification resumes from its saved snapshot after a network interruption", async () => {
